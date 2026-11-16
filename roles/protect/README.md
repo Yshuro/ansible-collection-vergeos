@@ -67,9 +67,9 @@ reporting success.
 `tests/live/verify-protect-partial.yml` is the ladder. It tags one `zz-`
 VM, leaves another untagged, and checks the cloud snapshot. The untagged
 VM must not be in it. Membership stays empty until `find_vms` runs
-(pyVergeOS #201), and `create(wait=True)` can return while the snapshot
-is still building (pyVergeOS #202), so the ladder polls and calls
-`find_vms` before it reads `cloud_snapshot_vms`.
+(pyVergeOS #201), and `create(wait=True)` can return while a `fields=all`
+read still says the snapshot is building (pyVergeOS #202), so the ladder
+polls that read and calls `find_vms` before it reads `cloud_snapshot_vms`.
 
 ## Orphans are always report-only
 
