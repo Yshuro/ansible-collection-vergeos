@@ -24,6 +24,53 @@ VM-taggable, a tag named for the class exists, and a snapshot profile
 (`protect-<class>` unless you override `profile:`) exists with those periods.
 Then it reconciles every tagged VM into the matching profile.
 
+## A period can snapshot a tagged subset
+
+Leave the tag keys off a period and it stays the all-or-nothing schedule
+this role has always written. Set them when one cloud should keep a dev
+tier and a production tier on different retention.
+
+```yaml
+protect_classes:
+  gold:
+    periods:
+      - name: Daily
+        frequency: daily
+        retention: 604800
+        hour: 2
+        include_tags:
+          - gold
+        quiesce_tags:
+          - gold
+```
+
+`include_tags` captures only VMs carrying those tags. `exclude_tags`
+captures everything else. A period cannot set both. `quiesce_tags` freezes
+disks on the VMs carrying those tags, and only alongside include or exclude.
+
+Each entry is a tag name or a numeric tag key. A name that exists in two
+categories is refused. The class tag this role creates is a natural include
+list: VMs tagged `protect/gold` are the ones the gold schedule captures.
+Any other tag name works the same way.
+
+Taking the keys back out of the playbook does not clear a scope that is
+already stored. Omission means the role does not manage that scope, which
+is what keeps an older playbook from rewriting periods. To change the set,
+write the new set.
+
+This needs a pyVergeOS build that contains PR #200. That change is on
+`dev` and is not in a release yet, so the collection floor stays
+`pyvergeos>=1.2.8`. On an older SDK the snapshot profile task fails and
+names the gap, instead of writing a field VergeOS would drop and then
+reporting success.
+
+`tests/live/verify-protect-partial.yml` is the ladder. It tags one `zz-`
+VM, leaves another untagged, and checks the cloud snapshot. The untagged
+VM must not be in it. Membership stays empty until `find_vms` runs
+(pyVergeOS #201), and `create(wait=True)` can return while the snapshot
+is still building (pyVergeOS #202), so the ladder polls and calls
+`find_vms` before it reads `cloud_snapshot_vms`.
+
 ## Orphans are always report-only
 
 A VM that carries a managed profile but is **no longer tagged** is reported as

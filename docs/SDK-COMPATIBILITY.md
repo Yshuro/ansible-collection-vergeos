@@ -178,6 +178,25 @@ function on the installed class. Otherwise it lists the fleet and matches
 drives warns (`no drives matched node ...`) instead of returning a silent
 empty report. The collection floor is `pyvergeos>=1.2.8`.
 
+## Tag-scoped snapshot periods (pyVergeOS #200)
+
+`cloud_snapshots.create()` has taken `include_tags`, `exclude_tags`, and
+`quiesce_tags` since the 1.6.1 line (pyVergeOS #129). A snapshot profile
+period did not. Released builds through 1.7.1 have no `include_tags` on
+`periods.create()`.
+
+PR #200 adds those three parameters to `periods.create()`, `update()`,
+`save()`, and `SnapshotProfile.add_period()`. It is commit
+`2645e6767e60f2dce52e756bcd846922f537f2b4` on pyVergeOS `dev`, and it is
+not in a release. The collection calls them from `snapshot_profile` and
+from the `protect` role. When the installed method does not accept
+`include_tags`, a period that sets any of the three fails and names #200.
+A period that sets none of them does not pass the keywords, so the
+all-or-nothing schedule is unchanged on 1.7.1.
+
+The floor stays `pyvergeos>=1.2.8`. Bump it when a release contains #200,
+not before. Issue #67.
+
 ## Consequences
 
 - The floor is `pyvergeos>=1.2.8`. 1.2.7 is no longer a supported SDK.

@@ -25,3 +25,10 @@ pyvergeos>=1.2.8
 # does not have, and that list is always empty. On those SDKs the module
 # matches node_name client-side. Do not raise this floor to pick up #143.
 # The parent_drive walk is released as of pyVergeOS 1.7.1.
+#
+# snapshot_profile periods accept include_tags, exclude_tags, and
+# quiesce_tags only when the installed SDK has them (pyVergeOS #200,
+# commit 2645e6767e60f2dce52e756bcd846922f537f2b4 on dev). That change
+# is not in a release. Do not raise this floor to pick it up. A period
+# that sets any of those parameters fails with a named error on an
+# older SDK. A period that sets none of them is still all-or-nothing.

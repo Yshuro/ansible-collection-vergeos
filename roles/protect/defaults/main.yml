@@ -27,6 +27,11 @@ protect_insecure: "{{ lookup('env', 'VERGEOS_INSECURE') | default(false, true) |
 #       profile: custom-profile-name     # default: protect-<class>
 #       periods:
 #         - {name: Daily, frequency: daily, retention: 259200, hour: 3}
+#
+# A period may also name include_tags, exclude_tags, or quiesce_tags
+# (pyVergeOS #200, dev only until that release exists). Omit them and the
+# period stays an all-or-nothing schedule. include and exclude together
+# are refused. quiesce_tags only applies next to one of those two.
 protect_classes: {}
 
 # report  = show what would change, touch nothing.

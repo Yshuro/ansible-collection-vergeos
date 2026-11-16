@@ -94,6 +94,7 @@ removes its record; the sweep fails if a `zz-*` import row is still there.
 | `verify-vm-clone.yml` | `vm_clone` — clone from a snapshot, idempotent on the clone name (#42) |
 | `verify-snapshot-profile.yml` | `snapshot_profile` — profiles and their periods (#39) |
 | `verify-protect.yml` | the `protect` role: tag a VM, get it enrolled (#39) |
+| `verify-protect-partial.yml` | the `protect` role: a tag-scoped period snapshots the tagged VM and not the untagged one (#67) |
 | `verify-vnet-rule.yml` | `vnet_rule` / `vnet_apply` — firewall rules and the explicit apply (#44, #19) |
 | `verify-vm-power.yml` | `vm` power waits — a budget that cannot be met fails instead of reporting success after sixty seconds (#114), and `state: absent` on a running VM is refused in check mode too (#127) |
 | `verify-vm-snapshot.yml` | `vm_snapshot` — never-expire and in-place restore (#119, #128), and a snapshot key from another VM refused on restore and delete (#161) |
