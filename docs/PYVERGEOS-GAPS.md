@@ -92,15 +92,34 @@ Not referenced by name anywhere under `plugins/`. Not checked again against
 
 This is the mechanism behind partial snapshots. `include_tags`,
 `exclude_tags`, and `quiesce_tags` live here, per snapshot profile
-**period**, with the object linkage through `tag_references`. Measured:
+**period**, with the object linkage through `tag_references`. Measured
+on 2026/09/09:
 
 ```
 snapshot_profile_period_tags : rows=26   keys=['$key','snapshot_profile_period','refs']
 tag_references               : rows=0    (nothing tagged on this system)
 ```
 
-`snapshot_profile` in this collection does not pass tag parameters.
-`cloud_snapshots.create()` had no tag parameters in the 1.2.3 SDK.
+`cloud_snapshots.create()` had no tag parameters in the 1.2.3 SDK. It
+does on the current floor. 1.6.1 takes `include_tags`, `exclude_tags`,
+and `quiesce_tags` and writes `type` plus `partial_tags` (pyVergeOS #129).
+
+The period side did not. Released pyVergeOS through 1.7.1 has no
+`include_tags` on `periods.create()`. pyVergeOS PR #200 (commit
+`2645e6767e60f2dce52e756bcd846922f537f2b4` on `dev`, not in a release)
+adds `include_tags`, `exclude_tags`, and `quiesce_tags` to
+`periods.create()`, `update()`, `save()`, and `SnapshotProfile.add_period()`.
+Those write `partial_tag_args` and `quiesce_tag_args`, not `partial_tags`
+or `quiesce_tags`. Those two are read-only rows. The tag keys are read
+back with `partial_tag_keys` and `quiesce_tag_keys`, which use
+`partial_tags[refs[tag]]` and `quiesce_tags[refs[tag]]`. The same PR adds
+`client.snapshot_profile_period_tags` and `client.tag_references`.
+
+`snapshot_profile` calls the three period parameters. It does not call
+those two managers. An installed SDK whose `periods.create()` lacks
+`include_tags` fails the task when a period sets any of them. A period
+with none of them is unchanged. The floor stays `pyvergeos>=1.2.8` until
+a release contains #200. Issue #67.
 
 ### `cloud_snapshot_actions`, `cloud_restore`, `cloud_snapshot_files`
 
@@ -219,7 +238,7 @@ document, `post_instance()` is the call site that changes.
 |---|---|---|
 | `cluster_status` | not modelled | modelled; collection still uses `_request` because `can_lose_one_node()` is an even split |
 | `machine_drive_stats` | not modelled | modelled; collection still filters `parent_drive`, because access by path key addresses `$key` |
-| P1 tables (~12) | unreachable | not called by this collection; not diffed again |
+| P1 tables (~12) | unreachable | period tag scope is pyVergeOS #200 on `dev`, not in a release; this collection calls `include_tags` / `exclude_tags` / `quiesce_tags` on periods and fails when the installed SDK lacks them (#67). The other P1 tables are still not called |
 | P2 tables | unreachable | not called by this collection; not diffed again |
 | OData `'` and `{` | `'` broken; `{` broken until 1.2.8 | fixed on the floor; lookups stay on the client for ambiguous names (#72) |
 | Member `member_type` / `member_key` | wrong on bare `users/N` | collection parses the ref itself (#92); SDK property not tested again here |

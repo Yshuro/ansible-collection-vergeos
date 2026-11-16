@@ -42,6 +42,9 @@
   loop_control:
     label: "{{ item.key }}"
 
+# periods are passed through as written. include_tags, exclude_tags, and
+# quiesce_tags scope that period; with none of them set, snapshot_profile
+# makes the same all-or-nothing call it always has.
 - name: Ensure a snapshot profile per class
   vergeio.vergeos.snapshot_profile:
     host: "{{ protect_host }}"

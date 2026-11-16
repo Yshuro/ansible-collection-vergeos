@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`protect` and `snapshot_profile`: tag-scoped snapshot periods** (#67). A period accepts `include_tags`, `exclude_tags`, and `quiesce_tags` and passes them to pyVergeOS. Omit them and the period stays an all-or-nothing schedule, including on a pyVergeOS that has never heard of the parameters. Include and exclude together are refused. Quiesce tags apply only on a partial period. Reading the scope back uses `snapshot_type`, `partial_tag_keys`, and `quiesce_tag_keys`. This needs pyVergeOS PR #200, which is on `dev` (commit `2645e6767e60f2dce52e756bcd846922f537f2b4`) and is not in a release yet. The collection floor stays `pyvergeos>=1.2.8` until that release exists. Using the tag parameters against an older SDK fails and names the gap, instead of writing a field VergeOS would drop. `tests/live/verify-protect-partial.yml` checks that a tagged VM is in the cloud snapshot and an untagged VM is not.
+
 ### Changed
 
 - **Role scripts no longer import urllib3** (#209). `billing_export`, `health_report`, `protect`, `rebalance_advisor`, and `tier_policy` build a `VergeClient` and leave `InsecureRequestWarning` to the SDK. When `verify_ssl` is false, pyvergeos filters that one warning. `urllib3` is not a direct dependency of the collection.
