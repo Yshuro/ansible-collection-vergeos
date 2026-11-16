@@ -6,10 +6,11 @@
 """The live partial-snapshot helper, without a cluster.
 
 The ladder is the thing that talks to VergeOS. These tests pin the order
-that ladder depends on: poll a fresh read after create(wait=True), call
-find_vms, and only then read cloud_snapshot_vms. They also pin the filter
-and the POST body, which are easy to "tidy" into something the platform
-does not fill in.
+that ladder depends on: poll GET cloud_snapshots/N?fields=all after
+create(wait=True), call find_vms only once that status has left building,
+and only then read cloud_snapshot_vms. cloud_snapshots.get() is not that
+check. They also pin the filter and the POST body, which are easy to
+"tidy" into something the platform does not fill in.
 """
 
 from __future__ import (absolute_import, division, print_function)
@@ -22,6 +23,11 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'live'))
 import partial_snapshot_probe as probe  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_sleep(monkeypatch):
+    monkeypatch.setattr(probe.time, 'sleep', lambda _seconds: None)
 
 
 class Snap(dict):
@@ -53,7 +59,7 @@ class Cloud:
 
 
 class Client:
-    def __init__(self, cloud=None):
+    def __init__(self, cloud=None, statuses=None):
         self.cloud_snapshots = cloud or Cloud()
         self.calls = []
         self._members = [
@@ -61,6 +67,8 @@ class Client:
              'cloud_snapshot': 9},
         ]
         self._snapshots = []
+        self._statuses = list(statuses or [])
+        self._status_hook = None
         self.snapshot_profiles = None
 
     def _request(self, method, path, params=None, json_data=None):
@@ -72,6 +80,18 @@ class Client:
             return list(self._members)
         if path == 'cloud_snapshots':
             return list(self._snapshots)
+        if method == 'GET' and path.startswith('cloud_snapshots/'):
+            key = int(path.rsplit('/', 1)[-1])
+            if self._status_hook is not None:
+                hook = self._status_hook
+                self._status_hook = None
+                hook()
+            item = self._statuses.pop(0) if self._statuses else 'normal'
+            if isinstance(item, dict):
+                return item
+            if item is None:
+                return {'$key': key}
+            return {'$key': key, 'status': item}
         return None
 
 
@@ -102,15 +122,16 @@ def test_create_without_the_parameter_does_not_call_create():
         probe.create_partial(client, 'zz-partial-snap', 'zz-partial')
 
 
-def test_create_polls_before_find_vms_and_uses_the_sdk_parameter():
-    """wait=True's return value is not the status we trust (#202).
+def test_create_polls_fields_all_before_find_vms():
+    """wait=True's get() is not the status we trust (#202).
 
-    The first fresh read is still building. find_vms runs only after a
-    later read has left building, and the membership GET is after that
-    (#201). The write is include_tags, not a column name.
+    get() would say normal immediately. The fields=all read is still
+    building, then normal. find_vms runs only after that, and the
+    membership GET is after find_vms (#201). The write is include_tags,
+    not a column name.
     """
-    cloud = Cloud(created_status='normal', gets=['building', 'normal'])
-    client = Client(cloud)
+    cloud = Cloud(created_status='normal', gets=['normal'])
+    client = Client(cloud, statuses=['building', 'normal'])
     result = probe.create_partial(
         client, 'zz-partial-snap', 'zz-partial', timeout=30)
 
@@ -119,18 +140,122 @@ def test_create_polls_before_find_vms_and_uses_the_sdk_parameter():
     assert cloud.created['name'] == 'zz-partial-snap'
     assert 'partial_tags' not in cloud.created
     assert 'partial_tag_args' not in cloud.created
-    assert cloud.gets == [9, 9]
+    # get() is the read wait=True already trusted. It must not be the
+    # settle check, or find_vms runs while fields=all still says building.
+    assert cloud.gets == []
     assert [call['path'] for call in client.calls] == [
+        'cloud_snapshots/9', 'cloud_snapshots/9',
         'cloud_snapshot_actions', 'cloud_snapshot_vms']
-    assert client.calls[0]['json_data'] == {
+    assert client.calls[0]['params'] == {'fields': 'all'}
+    assert client.calls[1]['params'] == {'fields': 'all'}
+    assert client.calls[2]['json_data'] == {
         'action': 'find_vms', 'cloud_snapshot': 9}
-    assert client.calls[1]['params']['filter'] == (
+    assert client.calls[3]['params']['filter'] == (
         'cloud_snapshot eq 9 and is_snapshot eq false')
     assert result == {
         'key': 9,
         'status': 'normal',
         'members': ['zz-partial-in'],
     }
+
+
+def test_create_retries_while_a_system_snapshot_is_building(monkeypatch):
+    """A profile period can start a system snapshot before this create.
+
+    create() raises ValidationError 'System snapshot is still building'
+    until that finishes. Listed rows can already read normal, so the
+    retry is on the error, not on a fields=all poll. A different
+    validation error is not retried.
+    """
+    class Busy(Exception):
+        pass
+
+    cloud = Cloud()
+    attempts = []
+
+    def create(**kwargs):
+        attempts.append(dict(kwargs))
+        if len(attempts) < 3:
+            raise Busy('System snapshot is still building')
+        return Snap({'$key': 9, 'status': 'normal'})
+
+    cloud.create = create
+    client = Client(cloud, statuses=['normal'])
+    monkeypatch.setattr(probe, '_validation_error_type', lambda: Busy)
+
+    result = probe.create_partial(
+        client, 'zz-partial-snap', 'zz-partial', timeout=30)
+
+    assert len(attempts) == 3
+    assert attempts[-1]['include_tags'] == ['zz-partial']
+    assert attempts[-1]['wait'] is True
+    assert result['key'] == 9
+    assert result['status'] == 'normal'
+
+
+def test_another_validation_error_is_not_retried(monkeypatch):
+    class Busy(Exception):
+        pass
+
+    cloud = Cloud()
+    attempts = []
+
+    def create(**kwargs):
+        attempts.append(1)
+        raise Busy('name already used')
+
+    cloud.create = create
+    client = Client(cloud)
+    monkeypatch.setattr(probe, '_validation_error_type', lambda: Busy)
+
+    with pytest.raises(Busy, match='name already used'):
+        probe.create_partial(
+            client, 'zz-partial-snap', 'zz-partial', timeout=30)
+    assert attempts == [1]
+
+
+def test_a_create_error_that_is_not_validation_is_not_retried(monkeypatch):
+    class Busy(Exception):
+        pass
+
+    cloud = Cloud()
+    attempts = []
+
+    def create(**kwargs):
+        attempts.append(1)
+        raise RuntimeError('connection reset')
+
+    cloud.create = create
+    client = Client(cloud)
+    monkeypatch.setattr(probe, '_validation_error_type', lambda: Busy)
+
+    with pytest.raises(RuntimeError, match='connection reset'):
+        probe.create_partial(
+            client, 'zz-partial-snap', 'zz-partial', timeout=30)
+    assert attempts == [1]
+
+
+def test_still_building_past_the_deadline_is_reported(monkeypatch):
+    class Busy(Exception):
+        pass
+
+    cloud = Cloud()
+    attempts = []
+
+    def create(**kwargs):
+        attempts.append(1)
+        raise Busy('System snapshot is still building')
+
+    cloud.create = create
+    client = Client(cloud)
+    monkeypatch.setattr(probe, '_validation_error_type', lambda: Busy)
+    ticks = iter([0, 0, 400])
+    monkeypatch.setattr(probe.time, 'time', lambda: next(ticks))
+
+    with pytest.raises(TimeoutError, match='still building'):
+        probe.create_partial(
+            client, 'zz-partial-snap', 'zz-partial', timeout=5)
+    assert len(attempts) == 2
 
 
 def test_a_wait_timeout_still_polls_the_row_it_created(monkeypatch):
@@ -143,7 +268,7 @@ def test_a_wait_timeout_still_polls_the_row_it_created(monkeypatch):
         raise Slow('gave up')
 
     cloud.create = explode
-    client = Client(cloud)
+    client = Client(cloud, statuses=['building', 'normal'])
     client._snapshots = [{'$key': 9, 'name': 'zz-partial-snap'}]
     monkeypatch.setattr(probe, '_wait_timeout_type', lambda: Slow)
 
@@ -152,12 +277,13 @@ def test_a_wait_timeout_still_polls_the_row_it_created(monkeypatch):
     assert result['key'] == 9
     assert result['status'] == 'normal'
     assert client.calls[0]['path'] == 'cloud_snapshots'
-    assert client.calls[1]['json_data']['action'] == 'find_vms'
+    assert client.calls[1]['path'] == 'cloud_snapshots/9'
+    assert client.calls[1]['params'] == {'fields': 'all'}
+    assert client.calls[3]['json_data']['action'] == 'find_vms'
 
 
 def test_still_building_at_the_deadline_is_an_error():
-    cloud = Cloud(gets=['building', 'building', 'building'])
-    client = Client(cloud)
+    client = Client(statuses=['building', 'building', 'building'])
     ticks = iter([0, 0, 50])
     monkeypatch_time = probe.time.time
     probe.time.time = lambda: next(ticks)
@@ -166,7 +292,59 @@ def test_still_building_at_the_deadline_is_an_error():
             probe.wait_until_settled(client, 9, timeout=5)
     finally:
         probe.time.time = monkeypatch_time
-    assert client.calls == []
+    assert [call['path'] for call in client.calls] == [
+        'cloud_snapshots/9', 'cloud_snapshots/9']
+    assert all(call['params'] == {'fields': 'all'} for call in client.calls)
+
+
+def test_a_slow_status_read_is_retried_until_the_budget(monkeypatch):
+    """One VergeTimeoutError is not the end of the wait.
+
+    pyvergeos renames a slow GET to VergeTimeoutError, and that class is
+    not the builtin TimeoutError. The fields=all poll has to keep going,
+    because the snapshot it is waiting on may still be building.
+    """
+    class Slow(Exception):
+        pass
+
+    client = Client(statuses=['normal'])
+
+    def fail_once():
+        raise Slow('slow read')
+
+    client._status_hook = fail_once
+    monkeypatch.setattr(probe, '_wait_timeout_type', lambda: Slow)
+
+    status = probe.wait_until_settled(client, 9, timeout=30)
+
+    assert status == 'normal'
+    assert [call['path'] for call in client.calls] == [
+        'cloud_snapshots/9', 'cloud_snapshots/9']
+
+
+def test_scrub_removes_password_and_token(monkeypatch):
+    monkeypatch.setenv('VERGEOS_PASSWORD', 's3cret-value')
+    monkeypatch.setenv('VERGEOS_TOKEN', 'tok-value')
+    text = probe.scrub('denied for s3cret-value using tok-value')
+    assert 's3cret-value' not in text
+    assert 'tok-value' not in text
+    assert '<VERGEOS_PASSWORD>' in text
+    assert '<VERGEOS_TOKEN>' in text
+
+
+def test_main_prints_one_scrubbed_line(monkeypatch, capsys):
+    monkeypatch.setenv('VERGEOS_PASSWORD', 's3cret-value')
+
+    def boom():
+        raise RuntimeError('auth failed for s3cret-value')
+
+    monkeypatch.setattr(probe, 'client', boom)
+    rc = probe.main(['create', '--name', 'zz-partial-snap',
+                     '--include-tag', 'zz-partial'])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert 's3cret-value' not in err
+    assert 'RuntimeError: auth failed for <VERGEOS_PASSWORD>' in err
 
 
 def test_delete_removes_only_the_named_snapshot():

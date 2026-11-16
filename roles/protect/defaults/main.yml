@@ -13,6 +13,7 @@
 # Connection.
 protect_host: "{{ lookup('env', 'VERGEOS_HOST') }}"
 protect_username: "{{ lookup('env', 'VERGEOS_USERNAME') }}"
+# aislop-ignore-next-line security/hardcoded-secret -- env lookup, not a literal
 protect_password: "{{ lookup('env', 'VERGEOS_PASSWORD') }}"
 protect_insecure: "{{ lookup('env', 'VERGEOS_INSECURE') | default(false, true) | bool }}"
 

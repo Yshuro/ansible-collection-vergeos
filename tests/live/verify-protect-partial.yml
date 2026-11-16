@@ -13,13 +13,27 @@
 #   pyVergeOS #201  cloud_snapshot_vms stays empty until
 #                   POST cloud_snapshot_actions
 #                   {action: find_vms, cloud_snapshot: N}
-#   pyVergeOS #202  cloud_snapshots.create(wait=True) can return while
-#                   the row is still building, so poll a fresh GET
-#                   before find_vms
+#   pyVergeOS #202  cloud_snapshots.create(wait=True) polls
+#                   cloud_snapshots.get() and can return while
+#                   GET cloud_snapshots/N?fields=all still says
+#                   building. The helper polls that read, not get(),
+#                   and only then calls find_vms. The old helper called
+#                   find_vms off get(), and any error other than
+#                   ValueError was a traceback under no_log.
+#
+# Saving the temporary period starts a system snapshot. create() then
+# raises ValidationError 'System snapshot is still building' until that
+# finishes. Listed rows can already read normal on fields=all, so the
+# helper retries only that error, for --timeout seconds, and re-raises
+# every other error.
 #
 # The helper tests/live/partial_snapshot_probe.py does that order.
 # This playbook then repeats the membership GET itself, so a bug in
 # the helper's own read cannot mark the untagged VM absent.
+#
+# The helper commands are no_log, because the password is in the
+# environment. no_log hides the whole result, so a failed command is
+# reported from its stderr. The helper scrubs that line.
 #
 # Not run from CI. Needs a pyVergeOS dev build that contains PR #200
 # for the period half. The one-shot snapshot uses include_tags, which
@@ -121,7 +135,16 @@
           register: period_raw
           changed_when: false
           check_mode: false
+          failed_when: false
           no_log: true
+
+        - name: "2d1. The period read must have succeeded"
+          ansible.builtin.fail:
+            msg: >-
+              partial_snapshot_probe.py show-period exited
+              {{ period_raw.rc | default('unknown') }}:
+              {{ period_raw.stderr | default('') | trim }}
+          when: period_raw.rc | default(0) != 0
 
         - name: "2e. Parse the period"
           ansible.builtin.set_fact:
@@ -209,7 +232,16 @@
               - "300"
           register: snap_raw
           changed_when: true
+          failed_when: false
           no_log: true
+
+        - name: "2n1. The snapshot command must have succeeded"
+          ansible.builtin.fail:
+            msg: >-
+              partial_snapshot_probe.py create exited
+              {{ snap_raw.rc | default('unknown') }}:
+              {{ snap_raw.stderr | default('') | trim }}
+          when: snap_raw.rc | default(0) != 0
 
         - name: "2o. Parse the snapshot"
           ansible.builtin.set_fact:

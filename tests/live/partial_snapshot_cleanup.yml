@@ -3,6 +3,9 @@
 # Included at the start as well, so a dead previous run does not collide.
 # The protect tag category is shared lab state: only remove it when this
 # run is the one that created it.
+# no_log because the password is in the environment. The next task
+# prints stderr, which the helper has already scrubbed, so a delete
+# that fails is not the word "censored".
 - name: Delete the scratch cloud snapshot
   ansible.builtin.command:
     argv:
@@ -11,8 +14,18 @@
       - delete
       - --name
       - "{{ snap_name }}"
+  register: snap_delete
   changed_when: false
+  failed_when: false
   no_log: true
+
+- name: The snapshot delete must have succeeded
+  ansible.builtin.fail:
+    msg: >-
+      partial_snapshot_probe.py delete exited
+      {{ snap_delete.rc | default('unknown') }}:
+      {{ snap_delete.stderr | default('') | trim }}
+  when: snap_delete.rc | default(0) != 0
 
 - name: Delete the scratch VMs
   vergeio.vergeos.vm:

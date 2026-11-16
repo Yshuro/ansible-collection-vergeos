@@ -14,13 +14,20 @@ Verbs, all of them JSON on stdout:
       An SDK that does not have those fails here, by name.
 
   create --name NAME --include-tag TAG [--timeout SECONDS]
-      cloud_snapshots.create(include_tags=[TAG], wait=True), then a fresh
-      read until status is set and is not ``building``. wait=True can
-      return while the row is still building (pyVergeOS #202), so the
-      return value of create() is not the check. Then
+      cloud_snapshots.create(include_tags=[TAG], wait=True). If the
+      platform answers ValidationError 'System snapshot is still building',
+      retry until --timeout (default 300 seconds). A profile period can
+      start a system snapshot, and listed rows can already read normal
+      while create is still refused, so this does not poll those rows.
+      Any other error is not retried. Then
+      GET cloud_snapshots/N?fields=all until status is set and is not
+      ``building``. wait=True polls cloud_snapshots.get() and can return
+      while that fields=all read still says building (pyVergeOS #202),
+      so get() is not the check. Then
       POST cloud_snapshot_actions {action: find_vms, cloud_snapshot: N}.
-      Membership stays empty until that runs (pyVergeOS #201). The VM
-      names come from
+      Membership stays empty until that runs (pyVergeOS #201), and the
+      action has nothing to fill in while the snapshot is still building.
+      The VM names come from
       GET cloud_snapshot_vms?filter=cloud_snapshot eq N and is_snapshot eq false.
 
   delete --name NAME
@@ -88,13 +95,6 @@ def settled(status):
     return bool(status) and status != 'building'
 
 
-def _status_of(snap):
-    try:
-        return dict(snap).get('status')
-    except (TypeError, ValueError):
-        return None
-
-
 def _cloud_tags_supported(create):
     if create is None:
         return False
@@ -117,15 +117,46 @@ def _snapshot_key(sdk, name):
     return keys[-1]
 
 
+def snapshot_status(sdk, key):
+    """Status from ``GET cloud_snapshots/N?fields=all``.
+
+    ``create(wait=True)`` decides it is done from ``cloud_snapshots.get()``.
+    That get can return while a ``fields=all`` read of the same row still
+    says ``building`` (pyVergeOS #202). ``status`` is the column the SDK
+    already waits on, and ``fields=all`` is the read #202 compared with
+    the early return. ``find_vms`` runs only after this leaves
+    ``building``, because a snapshot that is still building has no VM
+    list to fill in (#201).
+    """
+    payload = sdk._request(
+        'GET', 'cloud_snapshots/%d' % int(key),
+        params={'fields': 'all'},
+    )
+    if isinstance(payload, list):
+        payload = payload[0] if payload else None
+    if isinstance(payload, dict):
+        return payload.get('status')
+    return None
+
+
 def wait_until_settled(sdk, key, timeout):
-    """Poll a fresh GET until the snapshot leaves ``building``."""
+    """Poll fields=all until status is present and not ``building``.
+
+    A slow GET is ``VergeTimeoutError``, not the builtin ``TimeoutError``,
+    so it would otherwise escape this loop and fail the command while the
+    wait budget is still open. One slow read of a snapshot that is still
+    building is not a settled snapshot. It is retried until the budget
+    runs out.
+    """
     start = time.time()
     last = None
     while True:
-        snap = sdk.cloud_snapshots.get(int(key))
-        last = _status_of(snap)
+        try:
+            last = snapshot_status(sdk, key)
+        except _wait_timeout_type():
+            last = None
         if settled(last):
-            return snap, last
+            return last
         if timeout > 0 and (time.time() - start) > timeout:
             raise TimeoutError(
                 'cloud snapshot %s still building after %s seconds '
@@ -157,6 +188,53 @@ def _wait_timeout_type():
     return VergeTimeoutError
 
 
+def _validation_error_type():
+    from pyvergeos.exceptions import ValidationError
+    return ValidationError
+
+
+def _system_snapshot_busy(exc):
+    """The refusal measured on the lab: another system snapshot is building."""
+    return 'still building' in str(exc).lower()
+
+
+def _create_snapshot(sdk, name, include_tag, timeout):
+    """Create one include-scoped snapshot once the platform will accept it.
+
+    Saving the temporary profile period starts a system snapshot. create()
+    then raises ValidationError 'System snapshot is still building' until
+    that finishes. Rows already on the system can read status normal from
+    fields=all while the platform still refuses, so waiting on those rows
+    does not see it. Only this error is retried, and only for ``timeout``
+    seconds. Every other error is re-raised unchanged.
+    """
+    start = time.time()
+    delay = 2
+    while True:
+        try:
+            return sdk.cloud_snapshots.create(
+                name=name,
+                include_tags=[include_tag],
+                retention_seconds=3600,
+                wait=True,
+                wait_timeout=timeout,
+            )
+        except _validation_error_type() as exc:
+            if not _system_snapshot_busy(exc):
+                raise
+            elapsed = time.time() - start
+            if timeout > 0 and elapsed >= timeout:
+                raise TimeoutError(
+                    'system snapshot still building after %s seconds (%s)'
+                    % (timeout, exc))
+            pause = delay
+            if timeout > 0:
+                pause = min(delay, max(timeout - elapsed, 0))
+            time.sleep(pause)
+            if delay < 30:
+                delay = min(delay * 2, 30)
+
+
 def create_partial(sdk, name, include_tag, timeout=300):
     """One include-scoped cloud snapshot, settled, with VM names filled in."""
     include_tag = str(include_tag or '').strip()
@@ -171,13 +249,7 @@ def create_partial(sdk, name, include_tag, timeout=300):
             'include_tags. Tag-scoped cloud snapshots need the parameter '
             'added with pyVergeOS #129.')
     try:
-        snap = sdk.cloud_snapshots.create(
-            name=name,
-            include_tags=[include_tag],
-            retention_seconds=3600,
-            wait=True,
-            wait_timeout=timeout,
-        )
+        snap = _create_snapshot(sdk, name, include_tag, timeout)
         key = dict(snap).get('$key')
     except _wait_timeout_type():
         # create(wait=True) gave up, but the row may already exist (#202).
@@ -187,7 +259,7 @@ def create_partial(sdk, name, include_tag, timeout=300):
     if key is None:
         raise ValueError('cloud snapshot create returned no $key')
     key = int(key)
-    _snap, status = wait_until_settled(sdk, key, timeout)
+    status = wait_until_settled(sdk, key, timeout)
     find_vms(sdk, key)
     return {
         'key': key,
@@ -257,11 +329,28 @@ def _parser():
     return parser
 
 
+def scrub(text):
+    """One line a playbook can print.
+
+    The ladder runs this with no_log, because the password sits in the
+    environment, and no_log hides the whole task result. The playbook
+    prints stderr when the command fails, so a credential must not be
+    in that line. The API error's response body is not included, because
+    pyVergeOS says that body may carry secrets.
+    """
+    out = str(text)
+    for name in ('VERGEOS_PASSWORD', 'VERGEOS_TOKEN'):
+        secret = os.environ.get(name)
+        if secret:
+            out = out.replace(secret, '<%s>' % name)
+    return out
+
+
 def main(argv=None):
     parser = _parser()
     args = parser.parse_args(argv)
-    sdk = client()
     try:
+        sdk = client()
         if args.verb == 'show-period':
             if not args.profile or not args.period:
                 parser.error('--profile and --period are required')
@@ -275,8 +364,11 @@ def main(argv=None):
             if not args.name:
                 parser.error('--name is required')
             payload = delete_named(sdk, args.name)
-    except (ValueError, TimeoutError) as exc:
-        print(str(exc), file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001
+        # Any failure, not only ValueError. A requests timeout arrives as
+        # VergeTimeoutError, which is not the builtin TimeoutError, and a
+        # conflict or an API error used to be a traceback under no_log.
+        print('%s: %s' % (type(exc).__name__, scrub(exc)), file=sys.stderr)
         return 1
     json.dump(payload, sys.stdout)
     print()
