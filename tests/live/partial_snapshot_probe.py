@@ -14,7 +14,12 @@ Verbs, all of them JSON on stdout:
       An SDK that does not have those fails here, by name.
 
   create --name NAME --include-tag TAG [--timeout SECONDS]
-      cloud_snapshots.create(include_tags=[TAG], wait=True), then
+      cloud_snapshots.create(include_tags=[TAG], wait=True). If the
+      platform answers ValidationError 'System snapshot is still building',
+      retry until --timeout (default 300 seconds). A profile period can
+      start a system snapshot, and listed rows can already read normal
+      while create is still refused, so this does not poll those rows.
+      Any other error is not retried. Then
       GET cloud_snapshots/N?fields=all until status is set and is not
       ``building``. wait=True polls cloud_snapshots.get() and can return
       while that fields=all read still says building (pyVergeOS #202),
@@ -183,6 +188,53 @@ def _wait_timeout_type():
     return VergeTimeoutError
 
 
+def _validation_error_type():
+    from pyvergeos.exceptions import ValidationError
+    return ValidationError
+
+
+def _system_snapshot_busy(exc):
+    """The refusal measured on the lab: another system snapshot is building."""
+    return 'still building' in str(exc).lower()
+
+
+def _create_snapshot(sdk, name, include_tag, timeout):
+    """Create one include-scoped snapshot once the platform will accept it.
+
+    Saving the temporary profile period starts a system snapshot. create()
+    then raises ValidationError 'System snapshot is still building' until
+    that finishes. Rows already on the system can read status normal from
+    fields=all while the platform still refuses, so waiting on those rows
+    does not see it. Only this error is retried, and only for ``timeout``
+    seconds. Every other error is re-raised unchanged.
+    """
+    start = time.time()
+    delay = 2
+    while True:
+        try:
+            return sdk.cloud_snapshots.create(
+                name=name,
+                include_tags=[include_tag],
+                retention_seconds=3600,
+                wait=True,
+                wait_timeout=timeout,
+            )
+        except _validation_error_type() as exc:
+            if not _system_snapshot_busy(exc):
+                raise
+            elapsed = time.time() - start
+            if timeout > 0 and elapsed >= timeout:
+                raise TimeoutError(
+                    'system snapshot still building after %s seconds (%s)'
+                    % (timeout, exc))
+            pause = delay
+            if timeout > 0:
+                pause = min(delay, max(timeout - elapsed, 0))
+            time.sleep(pause)
+            if delay < 30:
+                delay = min(delay * 2, 30)
+
+
 def create_partial(sdk, name, include_tag, timeout=300):
     """One include-scoped cloud snapshot, settled, with VM names filled in."""
     include_tag = str(include_tag or '').strip()
@@ -197,13 +249,7 @@ def create_partial(sdk, name, include_tag, timeout=300):
             'include_tags. Tag-scoped cloud snapshots need the parameter '
             'added with pyVergeOS #129.')
     try:
-        snap = sdk.cloud_snapshots.create(
-            name=name,
-            include_tags=[include_tag],
-            retention_seconds=3600,
-            wait=True,
-            wait_timeout=timeout,
-        )
+        snap = _create_snapshot(sdk, name, include_tag, timeout)
         key = dict(snap).get('$key')
     except _wait_timeout_type():
         # create(wait=True) gave up, but the row may already exist (#202).

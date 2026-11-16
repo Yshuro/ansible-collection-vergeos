@@ -159,6 +159,105 @@ def test_create_polls_fields_all_before_find_vms():
     }
 
 
+def test_create_retries_while_a_system_snapshot_is_building(monkeypatch):
+    """A profile period can start a system snapshot before this create.
+
+    create() raises ValidationError 'System snapshot is still building'
+    until that finishes. Listed rows can already read normal, so the
+    retry is on the error, not on a fields=all poll. A different
+    validation error is not retried.
+    """
+    class Busy(Exception):
+        pass
+
+    cloud = Cloud()
+    attempts = []
+
+    def create(**kwargs):
+        attempts.append(dict(kwargs))
+        if len(attempts) < 3:
+            raise Busy('System snapshot is still building')
+        return Snap({'$key': 9, 'status': 'normal'})
+
+    cloud.create = create
+    client = Client(cloud, statuses=['normal'])
+    monkeypatch.setattr(probe, '_validation_error_type', lambda: Busy)
+
+    result = probe.create_partial(
+        client, 'zz-partial-snap', 'zz-partial', timeout=30)
+
+    assert len(attempts) == 3
+    assert attempts[-1]['include_tags'] == ['zz-partial']
+    assert attempts[-1]['wait'] is True
+    assert result['key'] == 9
+    assert result['status'] == 'normal'
+
+
+def test_another_validation_error_is_not_retried(monkeypatch):
+    class Busy(Exception):
+        pass
+
+    cloud = Cloud()
+    attempts = []
+
+    def create(**kwargs):
+        attempts.append(1)
+        raise Busy('name already used')
+
+    cloud.create = create
+    client = Client(cloud)
+    monkeypatch.setattr(probe, '_validation_error_type', lambda: Busy)
+
+    with pytest.raises(Busy, match='name already used'):
+        probe.create_partial(
+            client, 'zz-partial-snap', 'zz-partial', timeout=30)
+    assert attempts == [1]
+
+
+def test_a_create_error_that_is_not_validation_is_not_retried(monkeypatch):
+    class Busy(Exception):
+        pass
+
+    cloud = Cloud()
+    attempts = []
+
+    def create(**kwargs):
+        attempts.append(1)
+        raise RuntimeError('connection reset')
+
+    cloud.create = create
+    client = Client(cloud)
+    monkeypatch.setattr(probe, '_validation_error_type', lambda: Busy)
+
+    with pytest.raises(RuntimeError, match='connection reset'):
+        probe.create_partial(
+            client, 'zz-partial-snap', 'zz-partial', timeout=30)
+    assert attempts == [1]
+
+
+def test_still_building_past_the_deadline_is_reported(monkeypatch):
+    class Busy(Exception):
+        pass
+
+    cloud = Cloud()
+    attempts = []
+
+    def create(**kwargs):
+        attempts.append(1)
+        raise Busy('System snapshot is still building')
+
+    cloud.create = create
+    client = Client(cloud)
+    monkeypatch.setattr(probe, '_validation_error_type', lambda: Busy)
+    ticks = iter([0, 0, 400])
+    monkeypatch.setattr(probe.time, 'time', lambda: next(ticks))
+
+    with pytest.raises(TimeoutError, match='still building'):
+        probe.create_partial(
+            client, 'zz-partial-snap', 'zz-partial', timeout=5)
+    assert len(attempts) == 2
+
+
 def test_a_wait_timeout_still_polls_the_row_it_created(monkeypatch):
     class Slow(Exception):
         pass
