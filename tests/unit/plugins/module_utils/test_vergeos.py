@@ -245,6 +245,84 @@ class TestVergeosArgumentSpec:
         assert spec['insecure'].get('default') is False
 
 
+class TestPlatformKey:
+    """#216: "22" and 22 are the same platform key."""
+
+    def test_a_numeric_string_and_an_int_match(self):
+        from ansible_collections.vergeio.vergeos.plugins.module_utils.vergeos import (
+            same_platform_key,
+        )
+
+        assert same_platform_key('22', 22)
+        assert same_platform_key(22, '22')
+        assert same_platform_key('22', '22')
+        assert same_platform_key(22, 22)
+        assert same_platform_key(' 22 ', 22)
+
+    def test_a_different_key_does_not_match(self):
+        from ansible_collections.vergeio.vergeos.plugins.module_utils.vergeos import (
+            same_platform_key,
+        )
+
+        assert not same_platform_key('22', 15)
+        assert not same_platform_key(22, '15')
+        assert not same_platform_key(22, None)
+        assert not same_platform_key('22', '')
+        assert not same_platform_key('22', 'external')
+
+    def test_a_bool_is_not_a_key(self):
+        from ansible_collections.vergeio.vergeos.plugins.module_utils.vergeos import (
+            same_platform_key,
+        )
+
+        assert not same_platform_key(True, 1)
+        assert not same_platform_key(False, 0)
+        assert same_platform_key(True, True)
+
+    def test_key_property_wins_over_a_disagreeing_dollar_key(self):
+        from ansible_collections.vergeio.vergeos.plugins.module_utils.vergeos import (
+            platform_key,
+        )
+
+        class _Net(dict):
+            def __init__(self):
+                super().__init__({'$key': '99', 'name': 'ext'})
+                self.key = 22
+
+        assert platform_key(_Net()) == 22
+
+    def test_a_string_dollar_key_is_returned_as_an_int(self):
+        from ansible_collections.vergeio.vergeos.plugins.module_utils.vergeos import (
+            platform_key,
+        )
+
+        assert platform_key({'$key': '22', 'name': 'ext'}) == 22
+        assert isinstance(platform_key({'$key': '22'}), int)
+
+    def test_a_non_numeric_key_property_falls_back_to_dollar_key(self):
+        from ansible_collections.vergeio.vergeos.plugins.module_utils.vergeos import (
+            platform_key,
+        )
+
+        class _Net(dict):
+            def __init__(self):
+                super().__init__({'$key': '22', 'name': 'ext'})
+
+            @property
+            def key(self):
+                raise ValueError('Resource has no $key')
+
+        assert platform_key(_Net()) == 22
+
+    def test_a_missing_key_is_none(self):
+        from ansible_collections.vergeio.vergeos.plugins.module_utils.vergeos import (
+            platform_key,
+        )
+
+        assert platform_key({'name': 'ext'}) is None
+        assert platform_key(None) is None
+
+
 class TestAliasPlatformKey:
     """$key stays; key is the same value under a Jinja-readable name."""
 
