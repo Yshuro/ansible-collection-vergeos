@@ -723,6 +723,61 @@ def test_internal_questions_are_not_filled():
     out = fill_recipe_answers(questions, {})
     assert out["plain"] == {}
     assert out["secrets"] == {}
+    assert out["unfilled"] == []
+
+
+def test_a_supplied_internal_answer_is_kept_and_posted():
+    """VM_TIMEZONE is often an internal question. The override must survive."""
+    questions = [q("VM_TIMEZONE", "database_find", required=False,
+                   default="settings/timezone")]
+    filled = fill_recipe_answers(questions, {"VM_TIMEZONE": "UTC"})
+    assert filled["plain"]["VM_TIMEZONE"] == "UTC"
+    posted = resolve_answers(questions, {"VM_TIMEZONE": "UTC"})
+    assert posted["answers"]["VM_TIMEZONE"] == "UTC"
+    assert "VM_TIMEZONE" not in posted["pruned"]
+
+
+def test_timezone_settings_default_is_replaced_with_utc():
+    questions = [q("VM_TIMEZONE", "string", required=False,
+                   default="settings/timezone")]
+    out = fill_recipe_answers(questions, {})
+    assert out["plain"]["VM_TIMEZONE"] == "UTC"
+
+
+def test_required_question_with_a_concrete_default_is_sent():
+    questions = [
+        q("MINIO_USER", "string", required=True, default="minio",
+          display="Minio System User"),
+        q("INSTANCES", "num", required=True, default="2", display="Instances"),
+    ]
+    out = fill_recipe_answers(questions, {})
+    assert out["plain"]["MINIO_USER"] == "minio"
+    assert out["plain"]["INSTANCES"] == 2
+
+
+def test_required_list_uses_the_first_choice_when_the_default_is_not_one():
+    questions = [q("PICK", "list", required=True, default="settings/users",
+                   list={"a": "A", "b": "B"})]
+    out = fill_recipe_answers(questions, {})
+    assert out["plain"]["PICK"] == "a"
+    assert out["unfilled"] == []
+
+
+def test_required_iso_with_no_choices_is_unfilled():
+    questions = [q("INSTALL_ISO", "list", required=True, default="",
+                   table="files", display="Install ISO")]
+    out = fill_recipe_answers(questions, {}, {"INSTALL_ISO": []})
+    assert "INSTALL_ISO" not in out["plain"]
+    assert out["unfilled"] == [{"name": "INSTALL_ISO", "display": "Install ISO"}]
+
+
+def test_required_iso_download_url_default_is_sent():
+    questions = [q("WINDOWS_ISO", "list", required=True,
+                   default="https://example.invalid/windows.iso",
+                   table="files", display="Windows ISO")]
+    out = fill_recipe_answers(questions, {}, {"WINDOWS_ISO": []})
+    assert out["plain"]["WINDOWS_ISO"] == "https://example.invalid/windows.iso"
+    assert out["unfilled"] == []
 
 
 def test_optional_empty_question_is_not_filled():

@@ -238,20 +238,38 @@
                   clears it, and failed_when_suppressed_exception is only
                   attached by newer cores, so a refusal on 2.15 used to look
                   like a pass. -#}
+              {%- set supplied = matrix_base_answers
+                    | combine({'HOSTNAME': 'zz-mx-' ~ (recipe['$key'] | default(''))[:6],
+                               'YB_HOSTNAME': 'zz-mx-' ~ (recipe['$key'] | default(''))[:6]})
+                    | combine(matrix_overrides[nm] | default({})) -%}
+              {%- set filled = supplied | vergeio.vergeos.vergeos_fill_answers(
+                    r.item.questions | default([]),
+                    r.item.options | default({})) -%}
+              {%- set unfilled = filled.unfilled | default([]) -%}
               {%- set refused = r.failed | default(false) -%}
               {%- set ok = (not refused)
-                           and (r.simulate_result | default({})).ok | default(false) -%}
-              {%- set blocked = nm in matrix_blocked -%}
+                           and (r.simulate_result | default({})).ok | default(false)
+                           and (unfilled | length == 0) -%}
+              {%- set blocked = (nm in matrix_blocked) or (unfilled | length > 0) -%}
               {%- set detail = (r.simulate_result | default({})).errors | default([])
                                or [r.msg | default('refused before simulate')] -%}
+              {%- if unfilled | length > 0 -%}
+                {%- set detail = ['no choices for required question '
+                      ~ ((unfilled | map(attribute='display') | list) | join(', '))] -%}
+              {%- endif -%}
+              {%- set sent = (r.answers_sent | default([])) | join(', ') -%}
+              {%- set line = (('PASS    ' if ok else
+                              ('BLOCKED ' if blocked else 'FAIL    '))
+                             ~ nm ~ ' -- '
+                             ~ (detail | join('; ') | truncate(120, true))) -%}
+              {%- if (not ok) and (not blocked) -%}
+                {%- set line = line ~ ' [sent: ' ~ sent ~ ']' -%}
+              {%- endif -%}
               {%- set _ = out.append({
                     'name': nm,
                     'ok': ok,
                     'as_expected': (ok and not blocked) or ((not ok) and blocked),
-                    'line': (('PASS    ' if ok else
-                              ('BLOCKED ' if blocked else 'FAIL    '))
-                             ~ nm ~ ' -- '
-                             ~ (detail | join('; ') | truncate(150, true)))
+                    'line': line
                   }) -%}
             {%- endif -%}
           {%- endfor -%}

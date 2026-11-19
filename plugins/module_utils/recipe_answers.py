@@ -58,7 +58,11 @@ SECRET_NAME_RE = re.compile(
 # A question whose name is a timezone. An empty or zero answer makes the
 # recipe script run its timezone API command with 0.
 _TIMEZONE_NAME_RE = re.compile(r"time.?zone", re.IGNORECASE)
+# A default that names a settings row, such as settings/timezone, rather than
+# a value the API will store. The platform does not treat that as an answer.
+_SETTINGS_REF_RE = re.compile(r"^(?:settings/)?[A-Za-z0-9_]+/[A-Za-z0-9_]+$")
 _NOT_DOWNLOADED_TEXT = "not downloaded or published"
+_UNFILLED = object()
 _MISSING = object()
 # The API accepts this verbatim for a network answer: "make a new internal net".
 NEW_INTERNAL = "__new_internal__"
@@ -516,9 +520,11 @@ def _lift_to_minimum(question, value):
             return "UTC"
         return value
     mn = _declared(question.get("min"))
-    if mn is None or not _is_int(value):
+    if not _is_int(value):
         return value
     number = int(value)
+    if mn is None:
+        return number
     if number < mn:
         return mn
     return number
@@ -548,6 +554,39 @@ def _string_fill(question):
     return None
 
 
+def _default_is_concrete(question, options):
+    """True when the published default is a value the API will accept.
+
+    An empty default is not. Neither is a settings-row reference such as
+    ``settings/timezone``: the recipe script looks that row up, and a missing
+    row fails the command. A list or table default counts only when it is one
+    of the choices, or an http URL the recipe downloads itself.
+    """
+    default = question.get("default")
+    if _blankish(default):
+        return False
+    if isinstance(default, str):
+        text = default.strip()
+        if text.startswith("settings/") or _SETTINGS_REF_RE.match(text):
+            return False
+    qtype = question.get("type")
+    if qtype == "list" or qtype in TABLE_BACKED_TYPES:
+        inline = _inline_list_choices(question)
+        rows = (options or {}).get(question.get("name")) or []
+        keys = set(inline)
+        for row in rows:
+            key = row.get("$key")
+            if key is not None:
+                keys.add(str(key))
+        if str(default) in keys:
+            return True
+        if isinstance(default, str) and (
+                default.startswith("http://") or default.startswith("https://")):
+            return True
+        return False
+    return True
+
+
 def _choice_fill(question, options):
     """First valid choice for a list or table-backed question, or None."""
     inline = _inline_list_choices(question)
@@ -560,34 +599,45 @@ def _choice_fill(question, options):
 
 
 def _fill_missing(question, options):
-    """A value for a question the caller did not answer, or ``_MISSING``.
+    """A value for a question the caller did not answer, or a sentinel.
 
-    Required questions with no usable default are filled. A timezone question
-    whose default is empty or zero is filled with UTC even when it is
-    optional, because the recipe script otherwise runs that command with 0.
-    A numeric default below the question minimum is replaced with the minimum.
+    ``_MISSING`` means leave it to the platform. ``_UNFILLED`` means a
+    required choice has no options and no usable default, so nothing honest
+    can be sent.
+
+    A required question is answered explicitly. A default that merely names a
+    settings row is not an answer, and a list or ISO default is not an answer
+    unless it is one of the choices or a download URL. A timezone question
+    whose default is not a real zone is sent as UTC even when optional,
+    because the recipe script otherwise runs that command with the bad
+    default. A numeric default below the question minimum is raised to it.
     """
     name = question.get("name")
-    if _is_timezone_question(name) and _blankish(question.get("default")):
+    qtype = question.get("type")
+    concrete = _default_is_concrete(question, options)
+
+    if _is_timezone_question(name) and not concrete:
         return "UTC"
 
-    qtype = question.get("type")
-    if qtype in NUMERIC_TYPES and name:
-        default = question.get("default")
-        if _is_int(default):
-            lifted = _lift_to_minimum(question, default)
-            if lifted != int(default):
-                return lifted
+    if qtype in NUMERIC_TYPES and _is_int(question.get("default")):
+        lifted = _lift_to_minimum(question, question.get("default"))
+        if lifted != int(question.get("default")):
+            return lifted
 
     if not question.get("required"):
         return _MISSING
-    if question.get("default") not in (None, ""):
+
+    # A required credential is left unanswered. Inventing a password here
+    # would publish one that a real deploy would install.
+    if _is_credential_question(question, name) and not concrete:
         return _MISSING
 
-    # A required credential with no default is left unanswered. Inventing a
-    # value here would publish a password that a real deploy would install.
-    if _is_credential_question(question, name):
-        return _MISSING
+    if concrete:
+        default = question.get("default")
+        if qtype in NUMERIC_TYPES:
+            return _lift_to_minimum(question, default)
+        return default
+
     if qtype == "bool":
         return False
     if qtype in NUMERIC_TYPES:
@@ -595,7 +645,7 @@ def _fill_missing(question, options):
     if qtype == "list" or qtype in TABLE_BACKED_TYPES:
         choice = _choice_fill(question, options)
         if choice is None:
-            return _MISSING
+            return _UNFILLED
         return choice
     if qtype in ("string", "hostname", "textarea"):
         filled = _string_fill(question)
@@ -611,15 +661,14 @@ def fill_recipe_answers(questions, answers, options=None):
     Returns ``plain``, ``secrets``, and ``unanswered_secrets``.
 
     ``secrets`` holds only credential values the caller already supplied.
-    ``unanswered_secrets`` is the names of required credentials that have no
-    default and were not supplied. This function does not invent a password.
-    A deploy that needs one still fails closed until the caller sets it.
-    Everything else goes in ``plain``.
+    ``unanswered_secrets`` names required credentials that were left unset.
+    This function does not invent a password. ``unfilled`` names required
+    choices that have no options and no usable default.
 
+    Supplied answers are kept, including ones whose question is internal.
     Supplied numeric answers below the question minimum are raised to that
-    minimum. Other required questions with no usable default are filled from
-    the type, the option list, or the minimum. Unknown keys are kept, so
-    ``prune_unknown`` on the module can still drop them.
+    minimum. A required question the caller did not answer is filled from a
+    concrete default, the type, the option list, or the minimum.
     """
     supplied = dict(answers or {})
     by_name = {}
@@ -631,6 +680,7 @@ def fill_recipe_answers(questions, answers, options=None):
     plain = {}
     secrets = {}
     unanswered_secrets = []
+    unfilled = []
 
     def _store(name, value, question):
         if _is_credential_question(question, name):
@@ -643,8 +693,9 @@ def fill_recipe_answers(questions, answers, options=None):
         if question is None:
             _store(name, supplied[name], None)
             continue
-        if is_internal(question) or question.get("enabled") is False:
-            continue
+        # Keep a value the caller set, even on an internal question. The
+        # matrix override for VM_TIMEZONE is one of these: dropping it sends
+        # the platform back to the settings/timezone default.
         _store(name, _lift_to_minimum(question, supplied[name]), question)
 
     for name in sorted(by_name):
@@ -654,9 +705,15 @@ def fill_recipe_answers(questions, answers, options=None):
         if is_internal(question) or question.get("enabled") is False:
             continue
         filled = _fill_missing(question, options)
+        if filled is _UNFILLED:
+            unfilled.append({
+                "name": name,
+                "display": question.get("display") or name,
+            })
+            continue
         if filled is _MISSING:
             if (question.get("required")
-                    and question.get("default") in (None, "")
+                    and not _default_is_concrete(question, options)
                     and _is_credential_question(question, name)):
                 unanswered_secrets.append(name)
             continue
@@ -666,6 +723,7 @@ def fill_recipe_answers(questions, answers, options=None):
         "plain": plain,
         "secrets": secrets,
         "unanswered_secrets": unanswered_secrets,
+        "unfilled": unfilled,
     }
 
 
@@ -741,6 +799,11 @@ def resolve_answers(questions, answers, vnets=None, options=None,
         if qtype in SECRET_TYPES or looks_secret(name):
             secret_vars.append(name)
         if is_internal(q):
+            # Still send a value the caller set. Dropping it here makes the
+            # platform use the question's default, which for VM_TIMEZONE is a
+            # settings row that may not exist.
+            if name in answers:
+                resolved[name] = answers[name]
             continue
         if qtype in TABLE_BACKED_TYPES and q.get("table"):
             needs_options.append({
