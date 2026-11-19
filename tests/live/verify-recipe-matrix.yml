@@ -60,6 +60,15 @@
       "New VM":
         YB_NIC_main_nic: External
         SELECT_CREATE_CDROM: "no"
+      # VM_TIMEZONE defaults to settings/timezone. That row is missing on
+      # VergeOS 26.2, so the simulate returns
+      # Error executing API command 'VM_TIMEZONE': 0. #221
+      "Dev Bucket Storage":
+        VM_TIMEZONE: UTC
+      "Dev LAMP":
+        VM_TIMEZONE: UTC
+      "Dev Nextcloud":
+        VM_TIMEZONE: UTC
       # Required passwords and secrets are not listed here. The filler
       # reads them off the question set. Both Windows recipes enforce a
       # 100 GB minimum OS drive, require
