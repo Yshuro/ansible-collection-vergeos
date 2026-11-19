@@ -996,6 +996,82 @@ def test_tier_question_with_no_tier_anywhere_is_unfilled():
         "no storage tier for question 'OS Drive Tier'")
 
 
+def test_vergeos_shaped_answers_pass_the_module_validator():
+    """Every list default that is not a lab choice is replaced before validate.
+
+    The lab's tier table resolves to one row. SWAP_TIER and TIER*_DRIVES
+    publish another default. The filler's output has to pass resolve_answers,
+    which is the check vm_recipe_deploy runs before simulate.
+    """
+    iso = "https://updates.vergeos.com/public/verge-io-install-26.2.iso"
+    questions = [
+        q("HOSTNAME", "hostname", required=True, default="!!",
+          regex="[a-z][a-z0-9-]*"),
+        q("USER", required=True, default=""),
+        q("PASSWORD", "password", required=True, default=""),
+        q("YB_CPU_CORES", "num", required=False, default="1", min=1),
+        q("YB_RAM", "ram", required=False, default="512", min=1024),
+        q("YB_DRIVE_OS_SIZE", "disksize", required=True, default="", min=0),
+        q("BLOCKSIZE", "disksize", required=True, default="65536", min=512,
+          max=0),
+        q("INSTALL_ISO", "list", required=True, display="Install ISO",
+          default="https://marketplace.vergeos.com/nope.iso",
+          list={iso: "26.2",
+                "https://updates.vergeos.com/public/verge-io-install-26.3.iso": "26.3"}),
+        q("ISO_NAME", required=False, default=""),
+        q("TIER0_DRIVE_TIER", "list", required=False, default="0",
+          table="cluster_tiers"),
+        q("TIER5_DRIVE_TIER", "list", required=False, default="5",
+          table="cluster_tiers"),
+        q("SWAP_TIER", "list", required=False, default="0",
+          table="cluster_tiers", display="Swap Tier"),
+        q("TIER2_DRIVES", "list", required=False, default="2",
+          table="cluster_tiers", display="Tier 2 Drives"),
+        q("TIER3_DRIVES", "list", required=False, default="3",
+          table="cluster_tiers", display="Tier 3 Drives"),
+        q("TIER4_DRIVES", "list", required=False, default="4",
+          table="cluster_tiers", display="Tier 4 Drives"),
+        q("TIER5_DRIVES", "list", required=False, default="5",
+          table="cluster_tiers", display="Tier 5 Drives"),
+        q("REOPEN", "bool", required=False, default=""),
+        q("ASSET", "string", required=True, default="***", regex="[A-Za-z0-9]+",
+          min=2),
+        q("YB_IP_ADDR_TYPE", "list", required=False, default="static",
+          list={"dhcp": "DHCP", "static": "Static"}),
+        q("CREATE_TIER0_DRIVE_1", "database_create", section_name="$database"),
+    ]
+    tier_names = [
+        "TIER0_DRIVE_TIER", "TIER5_DRIVE_TIER", "SWAP_TIER",
+        "TIER2_DRIVES", "TIER3_DRIVES", "TIER4_DRIVES", "TIER5_DRIVES",
+    ]
+    options = {name: [{"$key": 1, "$display": "1"}] for name in tier_names}
+    filled = fill_recipe_answers(
+        questions,
+        {"HOSTNAME": "zz-mx", "USER": "ladder", "PASSWORD": "secret"},
+        options, None, [1])
+    posted = dict(filled["plain"])
+    posted.update(filled["secrets"])
+    assert posted["PASSWORD"] == "secret"
+    assert posted["INSTALL_ISO"] == iso
+    assert posted["YB_RAM"] == 1024
+    assert posted["YB_DRIVE_OS_SIZE"] == 1048576
+    assert posted["BLOCKSIZE"] == 65536
+    assert posted["ASSET"] != "***"
+    for name in tier_names:
+        assert posted[name] == 1, name
+    assert "CREATE_TIER0_DRIVE_1" not in posted
+    out = resolve_answers(questions, posted, options=options)
+    assert out["errors"] == [], " ".join(out["errors"])
+
+
+def test_optional_list_with_a_valid_default_is_not_replaced():
+    questions = [q("SWAP_TIER", "list", required=False, default="1",
+                   table="cluster_tiers")]
+    options = {"SWAP_TIER": [{"$key": 1, "$display": "1"}]}
+    out = fill_recipe_answers(questions, {}, options)
+    assert "SWAP_TIER" not in out["plain"]
+
+
 def test_drive_size_of_fifty_is_still_refused():
     """The 1 MB floor stays for a drive whose own bounds are not that small."""
     question = q("YB_DRIVE_OS_SIZE", "disksize", required=True, default="0",

@@ -247,9 +247,6 @@ def main():
                 # The raw row returns a credential default in clear text.
                 if q.get('default'):
                     q = dict(q, default='VALUE_SPECIFIED_IN_NO_LOG_PARAMETER')
-            # A hidden tier question is still the value a drive step reads
-            # as preferred_tier. Database commands stay internal: they are
-            # the step, not the answer.
             if is_internal(q) and not is_tier_question(q):
                 internal.append(q.get('name'))
             else:

@@ -84,15 +84,10 @@ INTERNAL_SECTION = "$database"
 INTERNAL_TYPES = frozenset({
     "hidden", "database_create", "database_edit", "database_find", "field",
 })
-# database_* questions are the recipe's API commands (CREATE_TIER0_DRIVE_1),
-# not the question that supplies preferred_tier. A hidden question can be.
 _TIER_COMMAND_TYPES = frozenset({
     "database_create", "database_edit", "database_find", "field",
 })
 _TIER_TABLES = frozenset({"storage_tiers", "cluster_tiers"})
-# SELECT_OS_TIER, YB_DRIVE_TIER, preferred_tier. CREATE_TIER0_DRIVE is a
-# command name, excluded separately, so the word tier in a step does not
-# make the step itself a selector.
 _TIER_NAME_RE = re.compile(
     r"(?:^|_)tier(?:$|_)|preferred.?tier", re.IGNORECASE)
 _TIER_DISPLAY_RE = re.compile(r"\btier\b", re.IGNORECASE)
@@ -186,14 +181,7 @@ def is_internal(question):
 
 
 def is_tier_question(question):
-    """True when this question is what a drive step reads as preferred_tier.
-
-    SELECT_OS_TIER is the stock one: optional, empty default, and the drive
-    create then fails with ``value '' is not in list for field
-    'preferred_tier'``. A hidden question with the same job counts. A
-    database_create command such as CREATE_TIER0_DRIVE_1 does not: that is
-    the step that consumes the tier, not the question that supplies it.
-    """
+    """True for a question that supplies preferred_tier, not a drive-create step."""
     if not isinstance(question, dict):
         return False
     name = question.get("name") or ""
@@ -213,11 +201,7 @@ def is_tier_question(question):
 
 
 def drive_tier_has_no_question(questions, message):
-    """True when a drive step set preferred_tier and no question supplies it.
-
-    The simulate log then says the value is ''. That is a script step, not
-    an answer the filler can invent a name for.
-    """
+    """True when preferred_tier is '' and no question supplies it."""
     if isinstance(message, (list, tuple)):
         text = " ".join(str(item) for item in message)
     else:
@@ -225,6 +209,29 @@ def drive_tier_has_no_question(questions, message):
     if _EMPTY_PREFERRED_TIER not in text:
         return False
     return not any(is_tier_question(q) for q in questions or [])
+
+
+def accepted_choice_keys(question, options):
+    """Choice keys ``resolve_answers`` will accept, in list order."""
+    qtype = question.get("type")
+    if qtype in TABLE_BACKED_TYPES and question.get("table"):
+        rows = (options or {}).get(question.get("name")) or []
+        return [row.get("$key") for row in rows
+                if isinstance(row, dict) and row.get("$key") is not None]
+    if qtype == "list":
+        return list(_inline_list_choices(question).keys())
+    return []
+
+
+def _matching_choice(question, keys):
+    """The published default when it is one of ``keys``, else None."""
+    default = question.get("default")
+    if _blankish(default):
+        return None
+    for key in keys:
+        if str(key) == str(default).strip():
+            return key
+    return None
 
 
 def describe_options(name, question, options):
@@ -838,22 +845,15 @@ def _tier_value(question, value):
 
 
 def _tier_choice(question, options, tiers):
-    """A tier the question accepts, or None when nothing honest exists.
-
-    The question's own choices win. A tier that exists on the system is
-    the fallback, and only then. No tier number is invented.
-    """
-    choices = _parsed_list(question)
-    if choices:
-        default = question.get("default")
-        if isinstance(default, str) and default.strip() in choices:
-            return _tier_value(question, default.strip())
-        return _tier_value(question, next(iter(choices)))
-    rows = (options or {}).get(question.get("name")) or []
-    for row in rows:
-        key = row.get("$key")
-        if key is not None:
-            return _tier_value(question, key)
+    """A tier ``resolve_answers`` will accept, or None."""
+    keys = accepted_choice_keys(question, options)
+    if not keys:
+        rows = (options or {}).get(question.get("name")) or []
+        keys = [row.get("$key") for row in rows
+                if isinstance(row, dict) and row.get("$key") is not None]
+    if keys:
+        matched = _matching_choice(question, keys)
+        return _tier_value(question, matched if matched is not None else keys[0])
     for tier in tiers or []:
         if _is_int(tier) and int(tier) > 0:
             return _tier_value(question, tier)
@@ -890,9 +890,11 @@ def _fill_missing(question, options, files=None, tiers=None):
         if lifted != int(question.get("default")):
             return lifted
 
-    # An optional tier question with an empty default is not optional in
-    # effect: the drive step reads it as preferred_tier and '' is rejected.
-    # Answer it even when the recipe did not mark it required.
+    if not _is_iso_question(question):
+        keys = accepted_choice_keys(question, options)
+        if keys and _matching_choice(question, keys) is None:
+            return keys[0]
+
     if is_tier_question(question) and not concrete:
         choice = _tier_choice(question, options, tiers)
         if choice is None:
@@ -920,8 +922,9 @@ def _fill_missing(question, options, files=None, tiers=None):
     if concrete:
         default = question.get("default")
         if qtype in NUMERIC_TYPES:
-            return _lift_to_minimum(question, default)
-        return default
+            default = _lift_to_minimum(question, default)
+        if not check_constraints(name, question, _coerce(default, qtype)):
+            return default
 
     if qtype == "bool":
         return False
@@ -1014,8 +1017,6 @@ def fill_recipe_answers(questions, answers, options=None, files=None,
         question = by_name[name]
         if question.get("enabled") is False:
             continue
-        # A hidden tier question still feeds preferred_tier. Other internal
-        # questions are recipe commands, not answers.
         if is_internal(question) and not is_tier_question(question):
             continue
         filled = _fill_missing(question, options, files, tiers)
@@ -1171,10 +1172,10 @@ def resolve_answers(questions, answers, vnets=None, options=None,
 
         errors.extend(check_constraints(name, q, value))
 
-        opts = (options or {}).get(name)
-        if opts and qtype in TABLE_BACKED_TYPES and q.get("table"):
-            valid = {str(o.get("$key")) for o in opts}
-            if str(value) not in valid:
+        choice_keys = accepted_choice_keys(q, options)
+        if (choice_keys and qtype in TABLE_BACKED_TYPES and q.get("table")
+                and not isinstance(value, (list, dict, tuple))):
+            if str(value) not in {str(key) for key in choice_keys}:
                 errors.append("answer %r is not a valid choice%s"
                               % (name, describe_options(name, q, options)))
                 continue
