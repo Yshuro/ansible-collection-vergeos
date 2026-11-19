@@ -684,23 +684,28 @@
           register: fz_secret
 
         # The registered result is what this reads. Before 2.22, ansible-core
-        # rewrites a no_log substring in that result, so the recipe name in
-        # the message loses the marker and the message contains ********.
-        # 2.22 keeps the real result and masks only what it prints. The
-        # placeholder there is $REDACTED$, when the core rewrites the text
-        # at all. Either placeholder counts. When the message still holds
-        # the recipe name, the marker may remain only inside that name.
-        # The value itself must not survive once the name is removed.
+        # rewrites a no_log substring, so the recipe name in the message loses
+        # the marker and the message contains ********. 2.22 keeps the real
+        # result and masks only what it prints. The placeholder there is
+        # $REDACTED$, when the core rewrites the text at all. Either
+        # placeholder counts. When the message still holds the recipe name,
+        # the marker may remain only inside that name.
+        #
+        # Do not scan the whole result. 2.22 returns the recipe row unchanged,
+        # and the marker is ordinary text in that row's description
+        # ("fuzz ladder recipe, ...") and in the catalog name. That is not
+        # the answer. The value itself must not appear in the message, once
+        # the recipe name is removed, or in the answer names the module
+        # returns.
         - name: "5d. The secret value is absent, and a mask uses either placeholder"
           vars:
             secret_msg: "{{ fz_secret.msg | default('') }}"
             secret_msg_outside_name: "{{ secret_msg | replace(fz_recipe, '') }}"
-            secret_result_outside_name: >-
-              {{ fz_secret | to_json | replace(fz_recipe, '') }}
+            answer_names: "{{ (fz_secret.answers_sent | default([])) | join(',') }}"
           ansible.builtin.assert:
             that:
-              - "'fuzz' not in secret_result_outside_name"
               - "'fuzz' not in secret_msg_outside_name"
+              - "'fuzz' not in answer_names"
               - >-
                 ('********' in secret_msg)
                 or ('$REDACTED$' in secret_msg)
