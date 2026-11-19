@@ -6,7 +6,10 @@ __metaclass__ = type
 import pytest
 
 from ansible_collections.vergeio.vergeos.plugins.module_utils.recipe_answers import (
+    THROWAWAY_SECRET,
+    fill_recipe_answers,
     maskable_strings,
+    recipe_not_applicable,
     resolve_answers,
     scan_simulate,
     unmaskable_answer_strings,
@@ -614,3 +617,124 @@ def test_secret_vars_naming_an_absent_answer_is_harmless():
 def test_empty_inputs_do_not_explode():
     assert unmaskable_answer_strings(None, None) == set()
     assert unmaskable_answer_strings({}, []) == set()
+
+
+# ── matrix answer fill ───────────────────────────────────────────────────────
+
+def test_required_secrets_are_filled_and_kept_out_of_plain():
+    questions = [
+        q("MINIO_ADMIN_PASSWORD", "password", required=True, default=""),
+        q("CLUSTER_SECRET", "string", required=True, default=""),
+        q("VPNPASS", "string", required=True, default=""),
+        q("HOSTNAME", required=True, default=""),
+    ]
+    out = fill_recipe_answers(questions, {"HOSTNAME": "zz-mx"})
+    assert out["plain"] == {"HOSTNAME": "zz-mx"}
+    assert set(out["secrets"]) == {
+        "MINIO_ADMIN_PASSWORD", "CLUSTER_SECRET", "VPNPASS"}
+    assert set(out["secrets"].values()) == {THROWAWAY_SECRET}
+    assert THROWAWAY_SECRET not in out["plain"].values()
+
+
+def test_required_bool_and_list_are_filled_from_the_question():
+    questions = [
+        q("REOPEN", "bool", required=True, default="", display="Reopen File During Writes"),
+        q("YB_IP_ADDR_TYPE", "list", required=True, default="",
+          list={"dhcp": "DHCP", "static": "Static"}),
+    ]
+    out = fill_recipe_answers(questions, {})
+    assert out["secrets"] == {}
+    assert out["plain"]["REOPEN"] is False
+    assert out["plain"]["YB_IP_ADDR_TYPE"] == "dhcp"
+
+
+def test_required_table_question_uses_the_first_option():
+    questions = [q("SELECT_OS_TIER", "row", required=True, default="",
+                   table="cluster_tiers")]
+    out = fill_recipe_answers(
+        questions, {}, {"SELECT_OS_TIER": [{"$key": 4, "$display": "4"}]})
+    assert out["plain"]["SELECT_OS_TIER"] == 4
+    assert out["secrets"] == {}
+
+
+def test_table_question_with_no_rows_is_left_unset():
+    questions = [q("WINDOWS_ISO", "list", required=True, default="",
+                   table="files")]
+    out = fill_recipe_answers(questions, {}, {"WINDOWS_ISO": []})
+    assert "WINDOWS_ISO" not in out["plain"]
+    assert out["secrets"] == {}
+
+
+def test_supplied_numeric_below_the_question_minimum_is_raised():
+    questions = [q("YB_RAM", "ram", default="1024", min=16384)]
+    out = fill_recipe_answers(questions, {"YB_RAM": 1024, "HOSTNAME": "zz-mx"})
+    assert out["plain"]["YB_RAM"] == 16384
+    assert out["plain"]["HOSTNAME"] == "zz-mx"
+
+
+def test_numeric_default_below_the_minimum_is_sent_as_the_minimum():
+    """The matrix did not mention this question. The published default is too small."""
+    questions = [q("YB_RAM", "ram", required=False, default="1024", min=16384)]
+    out = fill_recipe_answers(questions, {})
+    assert out["plain"]["YB_RAM"] == 16384
+
+
+def test_numeric_at_or_above_the_minimum_is_left_alone():
+    questions = [q("YB_RAM", "ram", default="1024", min=2048)]
+    out = fill_recipe_answers(questions, {"YB_RAM": 4096})
+    assert out["plain"]["YB_RAM"] == 4096
+
+
+def test_timezone_question_with_a_zero_default_is_utc():
+    questions = [q("VM_TIMEZONE", "string", required=False, default="0")]
+    out = fill_recipe_answers(questions, {})
+    assert out["plain"]["VM_TIMEZONE"] == "UTC"
+    assert out["secrets"] == {}
+
+
+def test_supplied_timezone_of_zero_is_replaced():
+    questions = [q("VM_TIMEZONE", "string", default="America/New_York")]
+    out = fill_recipe_answers(questions, {"VM_TIMEZONE": 0})
+    assert out["plain"]["VM_TIMEZONE"] == "UTC"
+
+
+def test_a_real_timezone_answer_is_kept():
+    questions = [q("YB_TIMEZONE", "string", default="0")]
+    out = fill_recipe_answers(questions, {"YB_TIMEZONE": "America/New_York"})
+    assert out["plain"]["YB_TIMEZONE"] == "America/New_York"
+
+
+def test_api_check_step_is_not_invented_when_it_is_not_a_question():
+    """API_CHECK_VW is a recipe command, not an answer, unless the recipe says so."""
+    questions = [q("HOSTNAME", required=False, default="host")]
+    out = fill_recipe_answers(questions, {"HOSTNAME": "zz-mx"})
+    assert "API_CHECK_VW" not in out["plain"]
+    assert "API_CHECK_VW" not in out["secrets"]
+
+
+def test_internal_questions_are_not_filled():
+    questions = [q("API_CHECK_VW", "database_find", required=True, default="")]
+    out = fill_recipe_answers(questions, {})
+    assert out["plain"] == {}
+    assert out["secrets"] == {}
+
+
+def test_optional_empty_question_is_not_filled():
+    questions = [q("SSH_KEY", required=False, default="")]
+    out = fill_recipe_answers(questions, {})
+    assert out["plain"] == {}
+
+
+def test_recipe_not_downloaded_is_not_applicable():
+    assert recipe_not_applicable({"name": "Gitlab", "downloaded": False}) is True
+    assert recipe_not_applicable({"name": "Gitlab", "downloaded": 0}) is True
+    assert recipe_not_applicable({"name": "Ubuntu", "downloaded": True}) is False
+    assert recipe_not_applicable({"name": "Local"}) is False
+
+
+def test_simulate_not_downloaded_message_is_not_applicable():
+    msg = ("the simulate POST refused the answer set: HTTP 422 -- "
+           "Recipe is not downloaded or published")
+    assert recipe_not_applicable(msg) is True
+    assert recipe_not_applicable({"downloaded": True}, message=msg) is True
+    assert recipe_not_applicable("answer 'YB_RAM' is 1024") is False

@@ -55,6 +55,15 @@ SECRET_TYPES = frozenset({"password"})
 # Over-matching only suppresses a log line, so this errs wide on purpose.
 SECRET_NAME_RE = re.compile(
     r"pass|secret|token|api[_-]?key|credential|private[_-]?key", re.I)
+# A question whose name is a timezone. An empty or zero answer makes the
+# recipe script run its timezone API command with 0.
+_TIMEZONE_NAME_RE = re.compile(r"time.?zone", re.IGNORECASE)
+# Throwaway used when a required credential has no default. Long enough that
+# it is not a one-character no_log value. The matrix must pass it through
+# the no_log answers parameter and must not print it.
+THROWAWAY_SECRET = "Zz-Matrix-Scratch-1!"
+_NOT_DOWNLOADED_TEXT = "not downloaded or published"
+_MISSING = object()
 # The API accepts this verbatim for a network answer: "make a new internal net".
 NEW_INTERNAL = "__new_internal__"
 # Substrings marking a failed step inside a simulate log.
@@ -444,6 +453,210 @@ def unmaskable_answer_strings(answers, secret_vars):
         target = secret_strings if name in secret else plain_strings
         target |= maskable_strings(value)
     return plain_strings - secret_strings
+
+
+def _blankish(value):
+    """True for the values a recipe treats as 'not set': empty, or zero."""
+    if value is None:
+        return True
+    if isinstance(value, str) and value.strip() in ("", "0"):
+        return True
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)) and value == 0:
+        return True
+    return False
+
+
+def _is_timezone_question(name):
+    return bool(_TIMEZONE_NAME_RE.search(name or ""))
+
+
+def _is_credential_question(question, name):
+    qtype = (question or {}).get("type")
+    return qtype in SECRET_TYPES or looks_secret(name)
+
+
+def recipe_not_applicable(value, message=None):
+    """True when a recipe cannot be simulated because it is not on this system.
+
+    ``value`` is a recipe row, or the module's failure message. A row whose
+    ``downloaded`` field is false is not applicable. So is a simulate that
+    came back with the platform's ``not downloaded or published`` reason.
+    A row that does not say either way is left to the simulate.
+    """
+    if isinstance(value, str):
+        return _NOT_DOWNLOADED_TEXT in value
+    text = "" if message is None else str(message)
+    if _NOT_DOWNLOADED_TEXT in text:
+        return True
+    if not isinstance(value, dict) or "downloaded" not in value:
+        return False
+    flag = value.get("downloaded")
+    return flag is False or flag in (0, "0", "false", "False")
+
+
+def _numeric_floor(question):
+    """The smallest value worth sending for a required numeric question.
+
+    The question's own minimum wins when it is a real size. Zero is the
+    disksize sentinel for 'use the recipe default', so a required disksize
+    with no positive minimum is sent as 1 MB, which is the smallest size
+    the validator accepts above that sentinel.
+    """
+    mn = _declared(question.get("min"))
+    qtype = question.get("type")
+    if mn is not None and mn > 0:
+        return mn
+    if qtype == "disksize":
+        return _DISKSIZE_MIN_BYTES
+    return 1
+
+
+def _lift_to_minimum(question, value):
+    """Raise a numeric answer that sits below the question's minimum."""
+    if question.get("type") not in NUMERIC_TYPES:
+        if _is_timezone_question(question.get("name")) and _blankish(value):
+            return "UTC"
+        return value
+    mn = _declared(question.get("min"))
+    if mn is None or not _is_int(value):
+        return value
+    number = int(value)
+    if number < mn:
+        return mn
+    return number
+
+
+def _string_fill(question):
+    """A string the question's own pattern and length will accept, or None."""
+    mn = _declared(question.get("min")) or 0
+    mx = _declared(question.get("max"))
+    regex = question.get("regex")
+    seeds = ["zz-mx", "a", "zzmx1"]
+    if mn > 1:
+        seeds.append("x" * mn)
+    for seed in seeds:
+        candidate = seed
+        if mn and len(candidate) < mn:
+            candidate = (candidate + ("x" * mn))[:mn]
+        if mx is not None and mx > 0 and len(candidate) > mx:
+            continue
+        if not regex:
+            return candidate
+        try:
+            if re.fullmatch(_regex_to_apply(regex), candidate):
+                return candidate
+        except re.error:
+            return candidate
+    return None
+
+
+def _choice_fill(question, options):
+    """First valid choice for a list or table-backed question, or None."""
+    inline = _inline_list_choices(question)
+    if inline:
+        return next(iter(inline))
+    rows = (options or {}).get(question.get("name")) or []
+    if not rows:
+        return None
+    return rows[0].get("$key")
+
+
+def _fill_missing(question, options):
+    """A value for a question the caller did not answer, or ``_MISSING``.
+
+    Required questions with no usable default are filled. A timezone question
+    whose default is empty or zero is filled with UTC even when it is
+    optional, because the recipe script otherwise runs that command with 0.
+    A numeric default below the question minimum is replaced with the minimum.
+    """
+    name = question.get("name")
+    if _is_timezone_question(name) and _blankish(question.get("default")):
+        return "UTC"
+
+    qtype = question.get("type")
+    if qtype in NUMERIC_TYPES and name:
+        default = question.get("default")
+        if _is_int(default):
+            lifted = _lift_to_minimum(question, default)
+            if lifted != int(default):
+                return lifted
+
+    if not question.get("required"):
+        return _MISSING
+    if question.get("default") not in (None, ""):
+        return _MISSING
+
+    if _is_credential_question(question, name):
+        return THROWAWAY_SECRET
+    if qtype == "bool":
+        return False
+    if qtype in NUMERIC_TYPES:
+        return _numeric_floor(question)
+    if qtype == "list" or qtype in TABLE_BACKED_TYPES:
+        choice = _choice_fill(question, options)
+        if choice is None:
+            return _MISSING
+        return choice
+    if qtype in ("string", "hostname", "textarea"):
+        filled = _string_fill(question)
+        if filled is None:
+            return _MISSING
+        return filled
+    return _MISSING
+
+
+def fill_recipe_answers(questions, answers, options=None):
+    """Complete an answer set from the recipe's own questions.
+
+    Returns ``{"plain": {...}, "secrets": {...}}``. Credentials go in
+    ``secrets`` and have to be passed through the module's no_log ``answers``
+    parameter. Everything else goes in ``plain``. Callers must not print
+    ``secrets``.
+
+    Supplied numeric answers below the question minimum are raised to that
+    minimum. Required questions with no usable default are filled from the
+    type, the option list, or the minimum. Unknown keys are kept, so
+    ``prune_unknown`` on the module can still drop them.
+    """
+    supplied = dict(answers or {})
+    by_name = {}
+    for question in questions or []:
+        name = question.get("name")
+        if name:
+            by_name[name] = question
+
+    plain = {}
+    secrets = {}
+
+    def _store(name, value, question):
+        if _is_credential_question(question, name):
+            secrets[name] = value
+        else:
+            plain[name] = value
+
+    for name in sorted(supplied):
+        question = by_name.get(name)
+        if question is None:
+            _store(name, supplied[name], None)
+            continue
+        if is_internal(question) or question.get("enabled") is False:
+            continue
+        _store(name, _lift_to_minimum(question, supplied[name]), question)
+
+    for name in sorted(by_name):
+        if name in plain or name in secrets:
+            continue
+        question = by_name[name]
+        if is_internal(question) or question.get("enabled") is False:
+            continue
+        filled = _fill_missing(question, options)
+        if filled is _MISSING:
+            continue
+        _store(name, filled, question)
+
+    return {"plain": plain, "secrets": secrets}
 
 
 def resolve_answers(questions, answers, vnets=None, options=None,
