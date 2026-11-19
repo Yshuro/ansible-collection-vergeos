@@ -127,6 +127,7 @@ def params(**over):
         'recipe': 'Ubuntu 22.04',
         'catalog': None,
         'answers': {},
+        'plain_answers': {},
         'prune_unknown': False,
         'auto_update': False,
         'simulate': True,
@@ -164,7 +165,8 @@ def collected_no_log(module_params):
     """The no_log strings ansible-core would collect for this call.
 
     password and api_key are no_log on their own. answers is no_log as a
-    whole, which is what makes an ordinary tier of 1 mask every "1".
+    whole. plain_answers is not, so a core count of 1 passed there is not
+    in this set and cannot be registered for the rest of the run.
     """
     values = set()
     for name in ('password', 'api_key', 'answers'):
@@ -317,6 +319,132 @@ def test_existing_vm_still_masks_everything_when_no_questions_are_published():
     assert recipe['vm_snapshot'] == 'VALUE_SPECIFIED_IN_NO_LOG_PARAMETER'
     assert recipe['$key'] == 'r********'
     assert '1' in module.no_log_values
+
+
+def test_plain_answers_is_not_no_log_and_answers_still_is():
+    client = FakeClient()
+    module = run(client, recipe='Nope')
+    spec = module.argument_spec
+    assert spec['answers'].get('no_log') is True
+    assert not spec['plain_answers'].get('no_log')
+
+
+def test_plain_answers_are_absent_from_the_no_log_set():
+    """1, 0 and no are ordinary. They must not be collected as no_log."""
+    module_params = params(
+        plain_answers={'YB_CPU_CORES': 1, 'SELECT_CREATE_UEFI': 0,
+                       'FLAG': 'no'},
+        answers={'PASSWORD': 'hunter2'})
+    values = collected_no_log(module_params)
+    assert '1' not in values
+    assert '0' not in values
+    assert 'no' not in values
+    assert 'hunter2' in values
+    assert 'secret' in values  # the connection password
+
+
+def test_the_same_answer_in_both_parameters_is_refused():
+    client = FakeClient(recipes=[RECIPE])
+    module = run(client, answers={'HOSTNAME': 'web-01'},
+                 plain_answers={'HOSTNAME': 'other'})
+    msg = failed(module)['msg']
+    assert 'HOSTNAME' in msg
+    assert 'plain_answers' in msg
+    assert 'web-01' not in msg
+    assert 'other' not in msg
+    assert client.posts == []
+
+
+def test_a_credential_in_plain_answers_is_refused_and_concealed():
+    client = FakeClient(recipes=[RECIPE],
+                        questions=[question('PASSWORD', 'password'),
+                                   question('HOSTNAME')])
+    with patch.object(vm_recipe_deploy, 'register_secrets') as reg:
+        module = run(client, no_log_values=set(),
+                     plain_answers={'PASSWORD': 'hunter2',
+                                    'HOSTNAME': 'web-01'})
+    msg = failed(module)['msg']
+    assert 'PASSWORD' in msg
+    assert 'hunter2' not in msg
+    assert 'plain_answers' in msg
+    assert client.posts == []
+    assert 'hunter2' in module.no_log_values
+    assert 'web-01' not in module.no_log_values
+    registered = set()
+    for call in reg.call_args_list:
+        registered |= set(call.args[0])
+    assert 'hunter2' in registered
+
+
+def test_a_named_secret_is_concealed_before_the_recipe_is_known():
+    """A missing recipe fails before question types exist. The value must
+    already be hidden, or it rides out in the failure result."""
+    client = FakeClient()
+    with patch.object(vm_recipe_deploy, 'register_secrets') as reg:
+        module = run(client, no_log_values=set(), recipe='Nope',
+                     plain_answers={'PASSWORD': 'hunter2',
+                                    'HOSTNAME': 'web-01'})
+    msg = failed(module)['msg']
+    assert 'no recipe named' in msg
+    assert 'hunter2' not in msg
+    assert 'hunter2' in module.no_log_values
+    assert 'web-01' not in module.no_log_values
+    registered = set()
+    for call in reg.call_args_list:
+        registered |= set(call.args[0])
+    assert registered == {'hunter2'}
+
+
+def test_overlap_conceals_a_secret_that_was_also_passed_in_plain():
+    client = FakeClient(recipes=[RECIPE])
+    with patch.object(vm_recipe_deploy, 'register_secrets'):
+        module = run(client, no_log_values=set(),
+                     answers={'PASSWORD': 'from-answers'},
+                     plain_answers={'PASSWORD': 'from-plain'})
+    msg = failed(module)['msg']
+    assert 'PASSWORD' in msg
+    assert 'from-plain' not in msg
+    assert 'from-answers' not in msg
+    assert 'from-plain' in module.no_log_values
+    assert client.posts == []
+
+
+def test_a_secret_looking_name_in_plain_answers_is_refused():
+    """The name is enough when the recipe does not publish that question."""
+    client = FakeClient(recipes=[RECIPE], questions=[question('HOSTNAME')])
+    with patch.object(vm_recipe_deploy, 'register_secrets'):
+        module = run(client, no_log_values=set(),
+                     plain_answers={'API_TOKEN': 'hunter2',
+                                    'HOSTNAME': 'web-01'})
+    msg = failed(module)['msg']
+    assert 'API_TOKEN' in msg
+    assert 'hunter2' not in msg
+    assert client.posts == []
+
+
+def test_plain_and_secret_answers_are_both_sent():
+    client = FakeClient(recipes=[RECIPE],
+                        questions=[question('HOSTNAME'),
+                                   question('PASSWORD', 'password'),
+                                   question('YB_CPU_CORES', 'num')],
+                        responses=[SIMULATE_405,
+                                   {'$key': 5, 'response': {'vm': 42}}])
+    module_params = params(plain_answers={'HOSTNAME': 'web-01',
+                                          'YB_CPU_CORES': 1},
+                           answers={'PASSWORD': 'hunter2'})
+    module = run(client, no_log_values=collected_no_log(module_params),
+                 plain_answers={'HOSTNAME': 'web-01', 'YB_CPU_CORES': 1},
+                 answers={'PASSWORD': 'hunter2'})
+    result = exited(module)
+    assert result['answers_sent'] == ['HOSTNAME', 'PASSWORD', 'YB_CPU_CORES']
+    sent = client.posts[-1]['answers']
+    assert sent['HOSTNAME'] == 'web-01'
+    assert sent['YB_CPU_CORES'] == 1
+    assert sent['PASSWORD'] == 'hunter2'
+    assert 'hunter2' not in repr(result)
+    assert '1' not in module.no_log_values
+    assert 'web-01' not in module.no_log_values
+    assert 'hunter2' in module.no_log_values
 
 
 def test_existing_vm_converges_even_when_an_answer_would_be_refused():
