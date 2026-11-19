@@ -211,25 +211,52 @@ def drive_tier_has_no_question(questions, message):
     return not any(is_tier_question(q) for q in questions or [])
 
 
+def _missing_choice_key(key):
+    """True for no key. ``0``, ``False`` and ``'0'`` are keys."""
+    return key is None or key == ""
+
+
 def accepted_choice_keys(question, options):
-    """Choice keys ``resolve_answers`` will accept, in list order."""
+    """Choice keys ``resolve_answers`` will accept, in list order.
+
+    A list question's own mapping comes first, including ``0``. Table rows
+    are added after that. ``0`` is not dropped.
+    """
     qtype = question.get("type")
+    keys = []
+    seen = set()
+
+    def add(key):
+        if _missing_choice_key(key):
+            return
+        marker = str(key)
+        if marker in seen:
+            return
+        seen.add(marker)
+        keys.append(key)
+
+    if qtype == "list":
+        # Key 0 stays. Other inline keys do not override a table.
+        for key in _parsed_list(question):
+            if question.get("table") and str(key) != "0":
+                continue
+            add(key)
     if qtype in TABLE_BACKED_TYPES and question.get("table"):
         rows = (options or {}).get(question.get("name")) or []
-        return [row.get("$key") for row in rows
-                if isinstance(row, dict) and row.get("$key") is not None]
-    if qtype == "list":
-        return list(_inline_list_choices(question).keys())
-    return []
+        for row in rows:
+            if isinstance(row, dict):
+                add(row.get("$key"))
+    return keys
 
 
 def _matching_choice(question, keys):
     """The published default when it is one of ``keys``, else None."""
     default = question.get("default")
-    if _blankish(default):
+    if _missing_choice_key(default):
         return None
+    text = str(default).strip()
     for key in keys:
-        if str(key) == str(default).strip():
+        if str(key) == text:
             return key
     return None
 
@@ -250,8 +277,16 @@ def describe_options(name, question, options):
                 % (question.get("table") or "?",
                    ", filter " + repr(question["filter"])
                    if question.get("filter") else ""))
+
+    def label(row):
+        for field in ("$display", "name", "$key"):
+            value = row.get(field)
+            if not _missing_choice_key(value):
+                return value
+        return row.get("$key")
+
     shown = ", ".join(
-        "%s=%s" % (o.get("$key"), o.get("$display") or o.get("name") or o.get("$key"))
+        "%s=%s" % (o.get("$key"), label(o))
         for o in opts[:8])
     return ", valid: %s%s" % (shown, " ..." if len(opts) > 8 else "")
 
@@ -727,11 +762,11 @@ def _parsed_list(question):
     if isinstance(raw, dict):
         pairs = raw.items()
     elif isinstance(raw, (list, tuple)):
-        pairs = [(item, "") for item in raw if isinstance(item, str)]
+        pairs = [(item, "") for item in raw if not _missing_choice_key(item)]
     else:
         return {}
     for key, label in pairs:
-        if key is None or key == "":
+        if _missing_choice_key(key):
             continue
         choices[str(key)] = "" if label is None else str(label)
     return choices
