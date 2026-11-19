@@ -13,7 +13,11 @@ short_description: Fill recipe answers from question metadata
 description:
   - Build the plain and secret answer dicts for one recipe.
   - C(secrets) contains only credential values the caller already supplied.
-  - C(unanswered_secrets) names required credentials that were left unset.
+    A published credential default is not copied. The no_log placeholders
+    C(VALUE_SPECIFIED_IN_NO_LOG_PARAMETER), C($REDACTED$), and eight
+    asterisks are not values.
+  - C(unanswered_secrets) names required credentials that were left unset,
+    including one whose published default was redacted.
     This filter does not invent a password for them.
 options:
   _input:

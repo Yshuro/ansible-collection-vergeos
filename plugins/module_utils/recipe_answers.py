@@ -64,6 +64,13 @@ _SETTINGS_REF_RE = re.compile(r"^(?:settings/)?[A-Za-z0-9_]+/[A-Za-z0-9_]+$")
 _NOT_DOWNLOADED_TEXT = "not downloaded or published"
 _UNFILLED = object()
 _MISSING = object()
+# ansible-core substitutes one of these for a no_log value. vm_recipe_info
+# writes the first one over a credential default. None of them is an answer.
+_NO_LOG_PLACEHOLDERS = frozenset((
+    "VALUE_SPECIFIED_IN_NO_LOG_PARAMETER",
+    "$REDACTED$",
+    "********",
+))
 # The API accepts this verbatim for a network answer: "make a new internal net".
 NEW_INTERNAL = "__new_internal__"
 # Substrings marking a failed step inside a simulate log.
@@ -455,6 +462,11 @@ def unmaskable_answer_strings(answers, secret_vars):
     return plain_strings - secret_strings
 
 
+def _is_no_log_placeholder(value):
+    """True for the tokens ansible-core prints in place of a no_log value."""
+    return isinstance(value, str) and value.strip() in _NO_LOG_PLACEHOLDERS
+
+
 def _blankish(value):
     """True for the values a recipe treats as 'not set': empty, or zero."""
     if value is None:
@@ -559,11 +571,14 @@ def _default_is_concrete(question, options):
 
     An empty default is not. Neither is a settings-row reference such as
     ``settings/timezone``: the recipe script looks that row up, and a missing
-    row fails the command. A list or table default counts only when it is one
-    of the choices, or an http URL the recipe downloads itself.
+    row fails the command. A no_log placeholder is not a value either.
+    ``vm_recipe_info`` writes ``VALUE_SPECIFIED_IN_NO_LOG_PARAMETER`` over a
+    credential default, and other cores print ``$REDACTED$`` or asterisks.
+    A list or table default counts only when it is one of the choices, or an
+    http URL the recipe downloads itself.
     """
     default = question.get("default")
-    if _blankish(default):
+    if _blankish(default) or _is_no_log_placeholder(default):
         return False
     if isinstance(default, str):
         text = default.strip()
@@ -627,9 +642,13 @@ def _fill_missing(question, options):
     if not question.get("required"):
         return _MISSING
 
-    # A required credential is left unanswered. Inventing a password here
-    # would publish one that a real deploy would install.
-    if _is_credential_question(question, name) and not concrete:
+    # A required credential is left unanswered, even when it publishes a
+    # default. Copying that default would post it. vm_recipe_info has
+    # already replaced a non-empty credential default with the no_log
+    # placeholder, so the value here is not the platform's secret. A real
+    # default stays on the platform, which applies it when the answer is
+    # omitted. Inventing a password here would install that password.
+    if _is_credential_question(question, name):
         return _MISSING
 
     if concrete:
@@ -661,7 +680,10 @@ def fill_recipe_answers(questions, answers, options=None):
     Returns ``plain``, ``secrets``, and ``unanswered_secrets``.
 
     ``secrets`` holds only credential values the caller already supplied.
-    ``unanswered_secrets`` names required credentials that were left unset.
+    A published credential default is not copied, including the no_log
+    placeholder ``vm_recipe_info`` substitutes for one.
+    ``unanswered_secrets`` names required credentials that were left unset,
+    whether or not a default was published.
     This function does not invent a password. ``unfilled`` names required
     choices that have no options and no usable default.
 
@@ -713,7 +735,6 @@ def fill_recipe_answers(questions, answers, options=None):
             continue
         if filled is _MISSING:
             if (question.get("required")
-                    and not _default_is_concrete(question, options)
                     and _is_credential_question(question, name)):
                 unanswered_secrets.append(name)
             continue

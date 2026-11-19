@@ -634,12 +634,49 @@ def test_required_secrets_are_named_and_not_invented():
         "CLUSTER_SECRET", "MINIO_ADMIN_PASSWORD", "VPNPASS"]
 
 
+@pytest.mark.parametrize("default", [
+    "VALUE_SPECIFIED_IN_NO_LOG_PARAMETER",
+    "$REDACTED$",
+    "********",
+    "published-default",
+])
+def test_a_required_credential_default_is_not_copied(default):
+    """vm_recipe_info redacts a credential default to the no_log token.
+
+    Posting that token would install it. A real published default stays on
+    the platform: the filler does not copy that either.
+    """
+    questions = [q("MINIO_ADMIN_PASSWORD", "password", required=True,
+                   default=default)]
+    out = fill_recipe_answers(questions, {})
+    assert out["secrets"] == {}
+    assert out["plain"] == {}
+    assert default not in out["secrets"].values()
+    assert out["unanswered_secrets"] == ["MINIO_ADMIN_PASSWORD"]
+
+
 def test_a_supplied_secret_is_kept():
     questions = [q("PASSWORD", "password", required=True, default="")]
     out = fill_recipe_answers(questions, {"PASSWORD": "caller-secret"})
     assert out["secrets"] == {"PASSWORD": "caller-secret"}
     assert out["unanswered_secrets"] == []
     assert out["plain"] == {}
+
+
+def test_a_supplied_secret_wins_over_a_redacted_default():
+    questions = [q("PASSWORD", "password", required=True,
+                   default="VALUE_SPECIFIED_IN_NO_LOG_PARAMETER")]
+    out = fill_recipe_answers(questions, {"PASSWORD": "caller-secret"})
+    assert out["secrets"] == {"PASSWORD": "caller-secret"}
+    assert out["unanswered_secrets"] == []
+
+
+def test_a_no_log_placeholder_is_not_sent_as_a_plain_default():
+    questions = [q("HOSTNAME", "string", required=True,
+                   default="VALUE_SPECIFIED_IN_NO_LOG_PARAMETER")]
+    out = fill_recipe_answers(questions, {})
+    assert out["plain"]["HOSTNAME"] != "VALUE_SPECIFIED_IN_NO_LOG_PARAMETER"
+    assert out["secrets"] == {}
 
 
 def test_required_bool_and_list_are_filled_from_the_question():
