@@ -26,6 +26,9 @@
 # A recipe that is not downloaded, or whose simulate says it is not
 # downloaded or published, is NOT APPLICABLE. That counts as expected.
 # Nothing is downloaded.
+#
+# A recipe whose name starts with "Dev " is not customer-facing. It is not
+# simulated. The matrix reports SKIPPED and counts it as expected.
 - name: Recipe matrix live ladder
   hosts: localhost
   gather_facts: false
@@ -63,15 +66,6 @@
       "New VM":
         YB_NIC_main_nic: External
         SELECT_CREATE_CDROM: "no"
-      # VM_TIMEZONE defaults to settings/timezone. That row is missing on
-      # VergeOS 26.2, so the simulate returns
-      # Error executing API command 'VM_TIMEZONE': 0. #221
-      "Dev Bucket Storage":
-        VM_TIMEZONE: UTC
-      "Dev LAMP":
-        VM_TIMEZONE: UTC
-      "Dev Nextcloud":
-        VM_TIMEZONE: UTC
       # Required passwords and secrets are not listed here. The filler
       # reads them off the question set. Both Windows recipes enforce a
       # 100 GB minimum OS drive, require
@@ -149,12 +143,13 @@
           {{ all_recipes.recipes | length }} recipes found;
           {{ matrix_blocked | length }} declared known-blocked.
 
-    - name: "0d. Separate recipes that are not downloaded"
+    - name: "0d. Separate recipes that are not simulated"
       ansible.builtin.set_fact:
         matrix_ready: >-
           {%- set ready = [] -%}
           {%- for recipe in all_recipes.recipes -%}
-            {%- if not (recipe | vergeio.vergeos.vergeos_not_applicable) -%}
+            {%- if not (recipe | vergeio.vergeos.vergeos_not_applicable)
+                      and not (recipe.name is match('^Dev ')) -%}
               {%- set _ = ready.append(recipe) -%}
             {%- endif -%}
           {%- endfor -%}
@@ -218,6 +213,15 @@
           {%- set out = [] -%}
           {%- for recipe in all_recipes.recipes | sort(attribute='name') -%}
             {%- set nm = recipe.name -%}
+            {%- if nm is match('^Dev ') -%}
+              {%- set _ = out.append({
+                    'name': nm,
+                    'ok': false,
+                    'as_expected': true,
+                    'line': 'SKIPPED ' ~ nm
+                            ~ ' -- Dev recipe, not customer-facing'
+                  }) -%}
+            {%- else -%}
             {%- set runs = matrix_runs.results | default([])
                            | selectattr('item.item.name', 'equalto', nm)
                            | list -%}
@@ -272,6 +276,7 @@
                     'line': line
                   }) -%}
             {%- endif -%}
+            {%- endif -%}
           {%- endfor -%}
           {{ out }}
 
@@ -313,6 +318,8 @@
           clean,
           {{ matrix_results | map(attribute='line')
              | select('match', '^N/A') | list | length }} not applicable,
+          {{ matrix_results | map(attribute='line')
+             | select('match', '^SKIPPED') | list | length }} skipped,
           {{ matrix_results | map(attribute='line')
              | select('match', '^BLOCKED') | list | length }} blocked-as-declared,
           of {{ matrix_results | length }} recipes -- and nothing was created
