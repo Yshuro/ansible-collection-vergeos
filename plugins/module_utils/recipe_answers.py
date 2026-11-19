@@ -84,6 +84,21 @@ INTERNAL_SECTION = "$database"
 INTERNAL_TYPES = frozenset({
     "hidden", "database_create", "database_edit", "database_find", "field",
 })
+# database_* questions are the recipe's API commands (CREATE_TIER0_DRIVE_1),
+# not the question that supplies preferred_tier. A hidden question can be.
+_TIER_COMMAND_TYPES = frozenset({
+    "database_create", "database_edit", "database_find", "field",
+})
+_TIER_TABLES = frozenset({"storage_tiers", "cluster_tiers"})
+# SELECT_OS_TIER, YB_DRIVE_TIER, preferred_tier. CREATE_TIER0_DRIVE is a
+# command name, excluded separately, so the word tier in a step does not
+# make the step itself a selector.
+_TIER_NAME_RE = re.compile(
+    r"(?:^|_)tier(?:$|_)|preferred.?tier", re.IGNORECASE)
+_TIER_DISPLAY_RE = re.compile(r"\btier\b", re.IGNORECASE)
+_STEP_NAME_RE = re.compile(
+    r"^(?:CREATE|EDIT|GET|CHANGE|DELETE|API)_", re.IGNORECASE)
+_EMPTY_PREFERRED_TIER = "value '' is not in list for field 'preferred_tier'"
 
 
 def _is_int(value):
@@ -168,6 +183,48 @@ def is_internal(question):
     return (question.get("type") in INTERNAL_TYPES
             or question.get("sect") == INTERNAL_SECTION
             or question.get("section_name") == INTERNAL_SECTION)
+
+
+def is_tier_question(question):
+    """True when this question is what a drive step reads as preferred_tier.
+
+    SELECT_OS_TIER is the stock one: optional, empty default, and the drive
+    create then fails with ``value '' is not in list for field
+    'preferred_tier'``. A hidden question with the same job counts. A
+    database_create command such as CREATE_TIER0_DRIVE_1 does not: that is
+    the step that consumes the tier, not the question that supplies it.
+    """
+    if not isinstance(question, dict):
+        return False
+    name = question.get("name") or ""
+    if _STEP_NAME_RE.match(name):
+        return False
+    qtype = question.get("type")
+    if qtype in _TIER_COMMAND_TYPES:
+        return False
+    table = str(question.get("table") or "")
+    if table in _TIER_TABLES:
+        return True
+    display = question.get("display") or ""
+    if _TIER_NAME_RE.search(name) or _TIER_DISPLAY_RE.search(display):
+        return qtype in TABLE_BACKED_TYPES or qtype in NUMERIC_TYPES or qtype in (
+            "string", "hidden", "list", None)
+    return False
+
+
+def drive_tier_has_no_question(questions, message):
+    """True when a drive step set preferred_tier and no question supplies it.
+
+    The simulate log then says the value is ''. That is a script step, not
+    an answer the filler can invent a name for.
+    """
+    if isinstance(message, (list, tuple)):
+        text = " ".join(str(item) for item in message)
+    else:
+        text = "" if message is None else str(message)
+    if _EMPTY_PREFERRED_TIER not in text:
+        return False
+    return not any(is_tier_question(q) for q in questions or [])
 
 
 def describe_options(name, question, options):
@@ -773,7 +830,37 @@ def _iso_answer(question, options, files):
     return _first_iso_answer(files, preferred)
 
 
-def _fill_missing(question, options, files=None):
+def _tier_value(question, value):
+    """A tier answer in the type the question stores."""
+    if question.get("type") in NUMERIC_TYPES and _is_int(value):
+        return int(value)
+    return value
+
+
+def _tier_choice(question, options, tiers):
+    """A tier the question accepts, or None when nothing honest exists.
+
+    The question's own choices win. A tier that exists on the system is
+    the fallback, and only then. No tier number is invented.
+    """
+    choices = _parsed_list(question)
+    if choices:
+        default = question.get("default")
+        if isinstance(default, str) and default.strip() in choices:
+            return _tier_value(question, default.strip())
+        return _tier_value(question, next(iter(choices)))
+    rows = (options or {}).get(question.get("name")) or []
+    for row in rows:
+        key = row.get("$key")
+        if key is not None:
+            return _tier_value(question, key)
+    for tier in tiers or []:
+        if _is_int(tier) and int(tier) > 0:
+            return _tier_value(question, tier)
+    return None
+
+
+def _fill_missing(question, options, files=None, tiers=None):
     """A value for a question the caller did not answer, or a sentinel.
 
     ``_MISSING`` means leave it to the platform. ``_UNFILLED`` means a
@@ -802,6 +889,15 @@ def _fill_missing(question, options, files=None):
         lifted = _lift_to_minimum(question, question.get("default"))
         if lifted != int(question.get("default")):
             return lifted
+
+    # An optional tier question with an empty default is not optional in
+    # effect: the drive step reads it as preferred_tier and '' is rejected.
+    # Answer it even when the recipe did not mark it required.
+    if is_tier_question(question) and not concrete:
+        choice = _tier_choice(question, options, tiers)
+        if choice is None:
+            return _UNFILLED
+        return choice
 
     if not question.get("required"):
         return _MISSING
@@ -848,7 +944,9 @@ def _unfilled_item(question):
     """Why a required choice was left unset."""
     name = question.get("name")
     display = question.get("display") or name
-    if _parsed_list(question):
+    if is_tier_question(question):
+        reason = "no storage tier for question '%s'" % display
+    elif _parsed_list(question):
         reason = "no usable choice for required question '%s'" % display
     elif _is_iso_question(question):
         reason = "no existing ISO for required question '%s'" % display
@@ -857,7 +955,8 @@ def _unfilled_item(question):
     return {"name": name, "display": display, "reason": reason}
 
 
-def fill_recipe_answers(questions, answers, options=None, files=None):
+def fill_recipe_answers(questions, answers, options=None, files=None,
+                        tiers=None):
     """Complete an answer set from the recipe's own questions.
 
     Returns ``plain``, ``secrets``, and ``unanswered_secrets``.
@@ -872,7 +971,9 @@ def fill_recipe_answers(questions, answers, options=None, files=None):
     read-only listing of files already on the system. An ISO question
     that publishes its own list is answered from that list. The listing
     is used only when there is no such list and the question accepts a
-    file. Nothing is downloaded or uploaded.
+    file. ``tiers`` is the tier numbers present on the system. A tier
+    question with no choices of its own is answered with the first of
+    those. Nothing is downloaded or uploaded.
 
     Supplied answers are kept, including ones whose question is internal.
     Supplied numeric answers below the question minimum are raised to that
@@ -911,9 +1012,13 @@ def fill_recipe_answers(questions, answers, options=None, files=None):
         if name in plain or name in secrets:
             continue
         question = by_name[name]
-        if is_internal(question) or question.get("enabled") is False:
+        if question.get("enabled") is False:
             continue
-        filled = _fill_missing(question, options, files)
+        # A hidden tier question still feeds preferred_tier. Other internal
+        # questions are recipe commands, not answers.
+        if is_internal(question) and not is_tier_question(question):
+            continue
+        filled = _fill_missing(question, options, files, tiers)
         if filled is _UNFILLED:
             unfilled.append(_unfilled_item(question))
             continue

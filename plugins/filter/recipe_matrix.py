@@ -39,6 +39,15 @@ options:
       - Used for an ISO question only when that question has no list
         choices of its own and its type or table accepts a file.
       - The filter does not download, upload, or create a file.
+  tiers:
+    description:
+      - Storage tier numbers present on the system, as C(site_info)
+        returns them in C(storage_tiers).
+      - Used when a tier question has no choices of its own.
+      - The filter does not create a tier.
+    type: list
+    elements: int
+    required: false
     type: list
     elements: dict
     required: false
@@ -58,13 +67,18 @@ _value:
 '''
 
 from ansible_collections.vergeio.vergeos.plugins.module_utils.recipe_answers import (
+    drive_tier_has_no_question,
     fill_recipe_answers,
     recipe_not_applicable,
 )
 
 
-def _fill(answers, questions, options=None, files=None):
-    return fill_recipe_answers(questions, answers, options, files)
+def _fill(answers, questions, options=None, files=None, tiers=None):
+    return fill_recipe_answers(questions, answers, options, files, tiers)
+
+
+def _tier_gap(message, questions):
+    return drive_tier_has_no_question(questions, message)
 
 
 class FilterModule(object):
@@ -74,4 +88,5 @@ class FilterModule(object):
         return {
             'vergeos_fill_answers': _fill,
             'vergeos_not_applicable': recipe_not_applicable,
+            'vergeos_tier_step_unanswered': _tier_gap,
         }

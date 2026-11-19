@@ -36,6 +36,11 @@
 # when the question has no choices and its type or table accepts a
 # file. With no usable choice the recipe is BLOCKED. Nothing is
 # downloaded or uploaded.
+#
+# A drive step that sets preferred_tier reads a tier question. An
+# optional question with an empty default is answered from its own
+# choices, or from the tiers site_info already lists. Nothing is
+# created. A drive step with no tier question on the recipe is BLOCKED.
 - name: Recipe matrix live ladder
   hosts: localhost
   gather_facts: false
@@ -185,6 +190,13 @@
     # plain_answers is not no_log. answers is. The filler does not invent a
     # credential. This check-mode task supplies the scratch value for the
     # names it left unset, and does not print that dict.
+    - name: "1c. Read storage tiers that already exist"
+      vergeio.vergeos.site_info:
+        insecure: true
+      register: matrix_site
+      check_mode: true
+      changed_when: false
+
     - name: "1b. Read existing ISO files, without uploading any"
       vergeio.vergeos.file_info:
         insecure: true
@@ -215,7 +227,8 @@
           {{ supplied | vergeio.vergeos.vergeos_fill_answers(
                item.questions | default([]),
                item.options | default({}),
-               matrix_isos.files | default([])) }}
+               matrix_isos.files | default([]),
+               matrix_site.storage_tiers | default([])) }}
       check_mode: true
       ignore_errors: true  # noqa: ignore-errors -- a refusal is data, recorded in failed
       register: matrix_runs
@@ -265,17 +278,24 @@
               {%- set filled = supplied | vergeio.vergeos.vergeos_fill_answers(
                     r.item.questions | default([]),
                     r.item.options | default({}),
-                    matrix_isos.files | default([])) -%}
+                    matrix_isos.files | default([]),
+                    matrix_site.storage_tiers | default([])) -%}
               {%- set unfilled = filled.unfilled | default([]) -%}
               {%- set refused = r.failed | default(false) -%}
+              {%- set detail = (r.simulate_result | default({})).errors | default([])
+                               or [r.msg | default('refused before simulate')] -%}
+              {%- set tier_gap = (detail | join(' '))
+                    | vergeio.vergeos.vergeos_tier_step_unanswered(
+                        r.item.questions | default([])) -%}
               {%- set ok = (not refused)
                            and (r.simulate_result | default({})).ok | default(false)
                            and (unfilled | length == 0) -%}
-              {%- set blocked = (nm in matrix_blocked) or (unfilled | length > 0) -%}
-              {%- set detail = (r.simulate_result | default({})).errors | default([])
-                               or [r.msg | default('refused before simulate')] -%}
+              {%- set blocked = (nm in matrix_blocked) or (unfilled | length > 0)
+                    or tier_gap -%}
               {%- if unfilled | length > 0 -%}
                 {%- set detail = unfilled | map(attribute='reason') | list -%}
+              {%- elif tier_gap -%}
+                {%- set detail = ['preferred_tier is set by a drive step and this recipe has no tier question'] -%}
               {%- endif -%}
               {%- set sent = (r.answers_sent | default([])) | join(', ') -%}
               {%- set line = (('PASS    ' if ok else

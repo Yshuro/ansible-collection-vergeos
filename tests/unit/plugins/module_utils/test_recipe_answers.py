@@ -6,6 +6,7 @@ __metaclass__ = type
 import pytest
 
 from ansible_collections.vergeio.vergeos.plugins.module_utils.recipe_answers import (
+    drive_tier_has_no_question,
     fill_recipe_answers,
     maskable_strings,
     recipe_not_applicable,
@@ -928,6 +929,71 @@ def test_blocksize_default_is_a_valid_disksize():
     out = resolve_answers([question], filled["plain"])
     assert out["errors"] == [], " ".join(out["errors"])
     assert out["answers"]["BLOCKSIZE"] == 65536
+
+
+def test_optional_tier_question_uses_its_own_choices():
+    """SELECT_OS_TIER is optional and its default is empty.
+
+    Leaving it unset makes the drive step send preferred_tier ''.
+    """
+    questions = [q("SELECT_OS_TIER", "row", required=False, default="",
+                   table="cluster_tiers", display="OS Drive Tier")]
+    options = {"SELECT_OS_TIER": [
+        {"$key": 1, "$display": "1"},
+        {"$key": 4, "$display": "4"},
+    ]}
+    out = fill_recipe_answers(questions, {}, options, None, [4])
+    assert out["plain"]["SELECT_OS_TIER"] == 1
+    assert out["unfilled"] == []
+
+
+def test_tier_question_without_choices_uses_a_tier_that_exists():
+    questions = [q("YB_DRIVE_TIER", "num", required=False, default="",
+                   display="Drive Tier")]
+    out = fill_recipe_answers(questions, {}, {}, None, [1, 4])
+    assert out["plain"]["YB_DRIVE_TIER"] == 1
+
+
+def test_hidden_tier_question_is_answered():
+    questions = [q("SELECT_DATA_TIER", "hidden", required=False, default="",
+                   section_name="$database", table="storage_tiers",
+                   display="Data Tier")]
+    options = {"SELECT_DATA_TIER": [{"$key": 2, "$display": "2"}]}
+    out = fill_recipe_answers(questions, {}, options)
+    assert out["plain"]["SELECT_DATA_TIER"] == 2
+
+
+def test_a_supplied_tier_is_kept():
+    questions = [q("SELECT_OS_TIER", "row", required=False, default="",
+                   table="cluster_tiers")]
+    out = fill_recipe_answers(
+        questions, {"SELECT_OS_TIER": 1},
+        {"SELECT_OS_TIER": [{"$key": 4, "$display": "4"}]}, None, [4])
+    assert out["plain"]["SELECT_OS_TIER"] == 1
+
+
+def test_drive_create_command_is_not_a_tier_question():
+    """CREATE_TIER0_DRIVE_1 is the step that reads preferred_tier."""
+    questions = [q("CREATE_TIER0_DRIVE_1", "database_create", required=False,
+                   default="", section_name="$database")]
+    out = fill_recipe_answers(questions, {}, {}, None, [1])
+    assert out["plain"] == {}
+    assert out["unfilled"] == []
+    message = ("Error executing API command 'CREATE_TIER0_DRIVE_1': "
+               "Error creating file for new drive: value '' is not in list "
+               "for field 'preferred_tier'")
+    assert drive_tier_has_no_question(questions, message) is True
+    assert drive_tier_has_no_question(
+        [q("SELECT_OS_TIER", "row", table="cluster_tiers")], message) is False
+
+
+def test_tier_question_with_no_tier_anywhere_is_unfilled():
+    questions = [q("SELECT_OS_TIER", "row", required=False, default="",
+                   table="cluster_tiers", display="OS Drive Tier")]
+    out = fill_recipe_answers(questions, {}, {"SELECT_OS_TIER": []}, None, [])
+    assert "SELECT_OS_TIER" not in out["plain"]
+    assert out["unfilled"][0]["reason"] == (
+        "no storage tier for question 'OS Drive Tier'")
 
 
 def test_drive_size_of_fifty_is_still_refused():
