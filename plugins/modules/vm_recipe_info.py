@@ -136,8 +136,9 @@ options:
         $display: "4"
 secret_questions:
   description:
-    - Names of questions whose answers are credentials. Pass these with
-      C(no_log) when you build an answer set.
+    - Names of questions whose answers are credentials. Pass these to
+      M(vergeio.vergeos.vm_recipe_deploy) in C(answers), which is C(no_log).
+      Pass the other answers in C(plain_answers) on that module.
   returned: when O(questions) is true and O(name) matched
   type: list
   elements: str

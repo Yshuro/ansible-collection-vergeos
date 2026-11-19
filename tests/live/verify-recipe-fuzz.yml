@@ -683,12 +683,28 @@
           failed_when: false
           register: fz_secret
 
-        - name: "5d. It is masked in the message and absent from the result"
+        # The registered result is what this reads. Before 2.22, ansible-core
+        # rewrites a no_log substring in that result, so the recipe name in
+        # the message loses the marker and the message contains ********.
+        # 2.22 keeps the real result and masks only what it prints. The
+        # placeholder there is $REDACTED$, when the core rewrites the text
+        # at all. Either placeholder counts. When the message still holds
+        # the recipe name, the marker may remain only inside that name.
+        # The value itself must not survive once the name is removed.
+        - name: "5d. The secret value is absent, and a mask uses either placeholder"
+          vars:
+            secret_msg: "{{ fz_secret.msg | default('') }}"
+            secret_msg_outside_name: "{{ secret_msg | replace(fz_recipe, '') }}"
+            secret_result_outside_name: >-
+              {{ fz_secret | to_json | replace(fz_recipe, '') }}
           ansible.builtin.assert:
             that:
-              - "'fuzz' not in (fz_secret.msg | default(''))"
-              - "'********' in (fz_secret.msg | default(''))"
-              - "'fuzz' not in (fz_secret | to_json | replace(fz_recipe, ''))"
+              - "'fuzz' not in secret_result_outside_name"
+              - "'fuzz' not in secret_msg_outside_name"
+              - >-
+                ('********' in secret_msg)
+                or ('$REDACTED$' in secret_msg)
+                or (fz_recipe in secret_msg)
             fail_msg: >-
               a password-typed answer stopped being masked:
               {{ fz_secret.msg | default('(none)') }}

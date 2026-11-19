@@ -427,10 +427,13 @@ def unmaskable_answer_strings(answers, secret_vars):
 
     ``answers`` has to stay ``no_log`` in the argument spec: it routinely
     carries passwords, and ansible-core logs the invocation before any module
-    code runs, so redacting later is too late for that path. What CAN be done
-    is to stop masking the non-credential answers in the module's own RETURN
-    values, once the recipe's question types have said which answers are
-    credentials.
+    code runs, so redacting later is too late for that path. Ordinary answers
+    belong in ``plain_answers``, which is not ``no_log``. What CAN still be
+    done for values that a playbook leaves in ``answers`` is to stop masking
+    the non-credential ones in the module's own RETURN values, once the
+    recipe's question types have said which answers are credentials. On
+    ansible-core 2.22 that does not change later output: those strings were
+    registered when the module started.
 
     A value that any secret answer also contributes is never returned here,
     so a password that happens to equal a core count stays masked.
