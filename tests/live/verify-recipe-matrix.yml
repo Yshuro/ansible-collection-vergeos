@@ -30,9 +30,12 @@
 # A recipe whose name starts with "Dev " is not customer-facing. It is not
 # simulated. The matrix reports SKIPPED and counts it as expected.
 #
-# An Install ISO question is answered with a file that already exists.
-# The listing is read-only. Nothing is uploaded. With no ISO on the
-# system the recipe is BLOCKED.
+# INSTALL_ISO is a list. When that list has choices, the answer is one
+# of them: the default, if the default is in the list, otherwise the
+# first https URL. A file from the read-only ISO listing is used only
+# when the question has no choices and its type or table accepts a
+# file. With no usable choice the recipe is BLOCKED. Nothing is
+# downloaded or uploaded.
 - name: Recipe matrix live ladder
   hosts: localhost
   gather_facts: false

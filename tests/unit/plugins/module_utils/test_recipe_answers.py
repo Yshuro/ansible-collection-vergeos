@@ -854,6 +854,54 @@ def test_install_iso_uses_a_read_only_file_listing():
     assert out["unfilled"] == []
 
 
+def test_install_iso_url_choices_ignore_the_default_and_the_local_file():
+    """VergeOS Install ISO publishes download URLs as its own list.
+
+    The default points at marketplace.vergeos.com and is not one of those
+    choices. A file from file_info is not one either. The answer is the
+    first https choice. Nothing is downloaded.
+    """
+    first = "https://updates.vergeos.com/public/verge-io-install-26.2.iso"
+    second = "https://updates.vergeos.com/public/verge-io-install-26.3.iso"
+    questions = [q(
+        "INSTALL_ISO", "list", required=True, display="Install ISO",
+        table="files",
+        default="https://marketplace.vergeos.com/public/verge-io-install.iso",
+        list={first: "VergeOS 26.2", second: "VergeOS 26.3"},
+    )]
+    files = [{"$key": 12, "name": "verge-io-install.iso", "type": "iso"}]
+    out = fill_recipe_answers(questions, {}, {"INSTALL_ISO": []}, files)
+    assert out["plain"]["INSTALL_ISO"] == first
+    assert out["unfilled"] == []
+    assert 12 not in out["plain"].values()
+
+
+def test_install_iso_uses_the_default_when_it_is_a_list_choice():
+    first = "https://updates.vergeos.com/public/verge-io-install-26.2.iso"
+    chosen = "https://updates.vergeos.com/public/verge-io-install-26.3.iso"
+    questions = [q(
+        "INSTALL_ISO", "list", required=True, display="Install ISO",
+        default=chosen,
+        list={first: "VergeOS 26.2", chosen: "VergeOS 26.3"},
+    )]
+    files = [{"$key": 12, "name": "verge-io-install.iso", "type": "iso"}]
+    out = fill_recipe_answers(questions, {}, {}, files)
+    assert out["plain"]["INSTALL_ISO"] == chosen
+
+
+def test_install_iso_list_without_an_https_choice_stays_unfilled():
+    questions = [q(
+        "INSTALL_ISO", "list", required=True, display="Install ISO",
+        default="https://marketplace.vergeos.com/not-a-choice.iso",
+        list={"local": "not a url"},
+    )]
+    files = [{"$key": 12, "name": "verge-io-install.iso", "type": "iso"}]
+    out = fill_recipe_answers(questions, {}, {}, files)
+    assert "INSTALL_ISO" not in out["plain"]
+    assert out["unfilled"][0]["reason"] == (
+        "no usable choice for required question 'Install ISO'")
+
+
 def test_install_iso_prefers_the_question_options_over_the_listing():
     questions = [q("INSTALL_ISO", "list", required=True, default="",
                    table="files", display="Install ISO")]

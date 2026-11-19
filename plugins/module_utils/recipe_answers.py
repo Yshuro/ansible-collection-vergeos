@@ -596,9 +596,8 @@ def _default_is_concrete(question, options):
     ``vm_recipe_info`` writes ``VALUE_SPECIFIED_IN_NO_LOG_PARAMETER`` over a
     credential default, and other cores print ``$REDACTED$`` or asterisks.
     A list or table default counts only when it is one of the choices, or an
-    http URL the recipe downloads itself. An ISO question is the exception:
-    the platform wants a file that already exists, and a download URL is
-    not that file.
+    http URL the recipe downloads itself. An ISO question with its own list
+    accepts the default only when that default is one of those choices.
     """
     default = question.get("default")
     if _blankish(default) or _is_no_log_placeholder(default):
@@ -617,14 +616,10 @@ def _default_is_concrete(question, options):
             if key is not None:
                 keys.add(str(key))
         if _is_iso_question(question):
-            # A download URL is how the Windows recipes name an image that
-            # is not on the system yet. The platform rejects it for an
-            # Install ISO that has to already be a file. The caller can
-            # still pass the URL; the filler will not invent that send.
-            chosen = _iso_answer(question, options, None)
-            if chosen is not None and str(chosen) == str(default):
-                return True
-            return str(default) in inline
+            choices = _parsed_list(question)
+            if not choices:
+                return False
+            return isinstance(default, str) and default.strip() in choices
         if str(default) in keys:
             return True
         if isinstance(default, str) and (
@@ -643,6 +638,50 @@ def _choice_fill(question, options):
     if not rows:
         return None
     return rows[0].get("$key")
+
+
+def _parsed_list(question):
+    """The question's own list choices, in published order.
+
+    Unlike ``_inline_list_choices``, a table does not hide this. The VergeOS
+    Install ISO question is a list of download URLs and the platform accepts
+    only those URLs. The mapping may arrive as a dict or as a JSON string.
+    A list of URL strings is the same set of choices.
+    """
+    if question.get("type") != "list":
+        return {}
+    raw = question.get("list")
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return {}
+        try:
+            raw = json.loads(text)
+        except ValueError:
+            return {}
+    choices = {}
+    if isinstance(raw, dict):
+        pairs = raw.items()
+    elif isinstance(raw, (list, tuple)):
+        pairs = [(item, "") for item in raw if isinstance(item, str)]
+    else:
+        return {}
+    for key, label in pairs:
+        if key is None or key == "":
+            continue
+        choices[str(key)] = "" if label is None else str(label)
+    return choices
+
+
+def _is_https(value):
+    return isinstance(value, str) and value.startswith("https://")
+
+
+def _accepts_existing_file(question):
+    """True when a file key is a legal answer for this question."""
+    if str(question.get("table") or "") == "files":
+        return True
+    return str(question.get("type") or "") == "file"
 
 
 def _is_iso_question(question):
@@ -691,12 +730,41 @@ def _first_iso_answer(rows, preferred=None):
     return found
 
 
-def _iso_answer(question, options, files):
-    """An existing ISO for this question, or None.
+def _iso_list_choice(question):
+    """One of the question's own list choices, or None when it has none.
 
-    The question's own option rows win. A read-only file listing is the
-    fallback. A download URL is not an ISO on this system.
+    The default is used only when it is one of those choices. Otherwise the
+    first https choice is used. A list that contains neither is not usable:
+    the caller must not substitute a local file.
     """
+    choices = _parsed_list(question)
+    if not choices:
+        return None
+    default = question.get("default")
+    if isinstance(default, str) and default.strip() in choices:
+        return default.strip()
+    for key in choices:
+        if _is_https(key):
+            return key
+    for label in choices.values():
+        if _is_https(label):
+            return label
+    return _UNFILLED
+
+
+def _iso_answer(question, options, files):
+    """The ISO answer, ``_UNFILLED`` when the list has nothing usable, or None.
+
+    A question that publishes its own list is answered from that list. A
+    local file, from the question's option rows or from a read-only
+    ``file_info`` listing, is used only when there is no such list and the
+    question's type or table accepts a file. Nothing is downloaded.
+    """
+    listed = _iso_list_choice(question)
+    if listed is not None:
+        return listed
+    if not _accepts_existing_file(question):
+        return None
     rows = (options or {}).get(question.get("name")) or []
     preferred = question.get("default")
     choice = _first_iso_answer(rows, preferred)
@@ -714,8 +782,10 @@ def _fill_missing(question, options, files=None):
 
     A required question is answered explicitly. A default that merely names a
     settings row is not an answer, and a list default is not an answer unless
-    it is one of the choices or a download URL. An ISO question is answered
-    with an existing file, from its options or from a read-only file list.
+    it is one of the choices or a download URL. An ISO question that publishes
+    its own list is answered with the default when that default is a choice,
+    otherwise with the first https choice. A local file is used only when
+    that list is absent and the question accepts a file.
     A timezone question
     whose default is not a real zone is sent as UTC even when optional,
     because the recipe script otherwise runs that command with the bad
@@ -746,10 +816,8 @@ def _fill_missing(question, options, files=None):
         return _MISSING
 
     if _is_iso_question(question):
-        if concrete:
-            return question.get("default")
         choice = _iso_answer(question, options, files)
-        if choice is None:
+        if choice is None or choice is _UNFILLED:
             return _UNFILLED
         return choice
 
@@ -780,7 +848,9 @@ def _unfilled_item(question):
     """Why a required choice was left unset."""
     name = question.get("name")
     display = question.get("display") or name
-    if _is_iso_question(question):
+    if _parsed_list(question):
+        reason = "no usable choice for required question '%s'" % display
+    elif _is_iso_question(question):
         reason = "no existing ISO for required question '%s'" % display
     else:
         reason = "no choices for required question '%s'" % display
@@ -800,8 +870,9 @@ def fill_recipe_answers(questions, answers, options=None, files=None):
     This function does not invent a password. ``unfilled`` names required
     choices that have no options and no usable default. ``files`` is a
     read-only listing of files already on the system. An ISO question
-    with no ISO in its own options uses that listing, and is left
-    unfilled when neither has one. Nothing is uploaded.
+    that publishes its own list is answered from that list. The listing
+    is used only when there is no such list and the question accepts a
+    file. Nothing is downloaded or uploaded.
 
     Supplied answers are kept, including ones whose question is internal.
     Supplied numeric answers below the question minimum are raised to that

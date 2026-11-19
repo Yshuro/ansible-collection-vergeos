@@ -36,8 +36,9 @@ options:
   files:
     description:
       - Files already on the system, as C(file_info) returns them.
-      - An ISO question with no ISO in its own options uses this list.
-      - The filter does not upload or create a file.
+      - Used for an ISO question only when that question has no list
+        choices of its own and its type or table accepts a file.
+      - The filter does not download, upload, or create a file.
     type: list
     elements: dict
     required: false
