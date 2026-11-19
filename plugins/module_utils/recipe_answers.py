@@ -58,10 +58,6 @@ SECRET_NAME_RE = re.compile(
 # A question whose name is a timezone. An empty or zero answer makes the
 # recipe script run its timezone API command with 0.
 _TIMEZONE_NAME_RE = re.compile(r"time.?zone", re.IGNORECASE)
-# Throwaway used when a required credential has no default. Long enough that
-# it is not a one-character no_log value. The matrix must pass it through
-# the no_log answers parameter and must not print it.
-THROWAWAY_SECRET = "Zz-Matrix-Scratch-1!"
 _NOT_DOWNLOADED_TEXT = "not downloaded or published"
 _MISSING = object()
 # The API accepts this verbatim for a network answer: "make a new internal net".
@@ -588,8 +584,10 @@ def _fill_missing(question, options):
     if question.get("default") not in (None, ""):
         return _MISSING
 
+    # A required credential with no default is left unanswered. Inventing a
+    # value here would publish a password that a real deploy would install.
     if _is_credential_question(question, name):
-        return THROWAWAY_SECRET
+        return _MISSING
     if qtype == "bool":
         return False
     if qtype in NUMERIC_TYPES:
@@ -610,14 +608,17 @@ def _fill_missing(question, options):
 def fill_recipe_answers(questions, answers, options=None):
     """Complete an answer set from the recipe's own questions.
 
-    Returns ``{"plain": {...}, "secrets": {...}}``. Credentials go in
-    ``secrets`` and have to be passed through the module's no_log ``answers``
-    parameter. Everything else goes in ``plain``. Callers must not print
-    ``secrets``.
+    Returns ``plain``, ``secrets``, and ``unanswered_secrets``.
+
+    ``secrets`` holds only credential values the caller already supplied.
+    ``unanswered_secrets`` is the names of required credentials that have no
+    default and were not supplied. This function does not invent a password.
+    A deploy that needs one still fails closed until the caller sets it.
+    Everything else goes in ``plain``.
 
     Supplied numeric answers below the question minimum are raised to that
-    minimum. Required questions with no usable default are filled from the
-    type, the option list, or the minimum. Unknown keys are kept, so
+    minimum. Other required questions with no usable default are filled from
+    the type, the option list, or the minimum. Unknown keys are kept, so
     ``prune_unknown`` on the module can still drop them.
     """
     supplied = dict(answers or {})
@@ -629,6 +630,7 @@ def fill_recipe_answers(questions, answers, options=None):
 
     plain = {}
     secrets = {}
+    unanswered_secrets = []
 
     def _store(name, value, question):
         if _is_credential_question(question, name):
@@ -653,10 +655,18 @@ def fill_recipe_answers(questions, answers, options=None):
             continue
         filled = _fill_missing(question, options)
         if filled is _MISSING:
+            if (question.get("required")
+                    and question.get("default") in (None, "")
+                    and _is_credential_question(question, name)):
+                unanswered_secrets.append(name)
             continue
         _store(name, filled, question)
 
-    return {"plain": plain, "secrets": secrets}
+    return {
+        "plain": plain,
+        "secrets": secrets,
+        "unanswered_secrets": unanswered_secrets,
+    }
 
 
 def resolve_answers(questions, answers, vnets=None, options=None,

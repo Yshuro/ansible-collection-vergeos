@@ -41,6 +41,9 @@
     win2025_iso: "{{ win_iso_host }}/dbazure/888969d5-f34g-4e03-ac9d-1f9786c66749/{{ win2025_iso_name }}"
 
     # Applied to every recipe. Values are throwaway; nothing is deployed.
+    # Used only by this check-mode playbook, for a required credential the
+    # filler deliberately leaves unset. Not a value the filter will invent.
+    matrix_scratch_secret: Zz-Matrix-Scratch-1!
     matrix_base_answers:
       HOSTNAME: zz-mx
       YB_HOSTNAME: zz-mx            # the vendor Services recipe wants both
@@ -177,8 +180,9 @@
     # failed_when would clear it, and failed_when_suppressed_exception is
     # not set on ansible-core 2.15.
     #
-    # plain_answers is not no_log. answers is. The filler puts credentials
-    # only in answers, and this task does not print that dict.
+    # plain_answers is not no_log. answers is. The filler does not invent a
+    # credential. This check-mode task supplies the scratch value for the
+    # names it left unset, and does not print that dict.
     - name: "2. Simulate each downloaded recipe in check mode"
       vergeio.vergeos.vm_recipe_deploy:
         insecure: true
@@ -187,7 +191,10 @@
         catalog: "{{ item.item.catalog_display | default(omit, true) }}"
         prune_unknown: true
         plain_answers: "{{ filled.plain }}"
-        answers: "{{ filled.secrets }}"
+        answers: >-
+          {{ filled.secrets | combine(dict(
+               filled.unanswered_secrets | product([matrix_scratch_secret])
+             )) }}
       vars:
         supplied: >-
           {{ matrix_base_answers

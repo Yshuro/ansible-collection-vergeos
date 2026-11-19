@@ -6,7 +6,6 @@ __metaclass__ = type
 import pytest
 
 from ansible_collections.vergeio.vergeos.plugins.module_utils.recipe_answers import (
-    THROWAWAY_SECRET,
     fill_recipe_answers,
     maskable_strings,
     recipe_not_applicable,
@@ -621,7 +620,7 @@ def test_empty_inputs_do_not_explode():
 
 # ── matrix answer fill ───────────────────────────────────────────────────────
 
-def test_required_secrets_are_filled_and_kept_out_of_plain():
+def test_required_secrets_are_named_and_not_invented():
     questions = [
         q("MINIO_ADMIN_PASSWORD", "password", required=True, default=""),
         q("CLUSTER_SECRET", "string", required=True, default=""),
@@ -630,10 +629,17 @@ def test_required_secrets_are_filled_and_kept_out_of_plain():
     ]
     out = fill_recipe_answers(questions, {"HOSTNAME": "zz-mx"})
     assert out["plain"] == {"HOSTNAME": "zz-mx"}
-    assert set(out["secrets"]) == {
-        "MINIO_ADMIN_PASSWORD", "CLUSTER_SECRET", "VPNPASS"}
-    assert set(out["secrets"].values()) == {THROWAWAY_SECRET}
-    assert THROWAWAY_SECRET not in out["plain"].values()
+    assert out["secrets"] == {}
+    assert out["unanswered_secrets"] == [
+        "CLUSTER_SECRET", "MINIO_ADMIN_PASSWORD", "VPNPASS"]
+
+
+def test_a_supplied_secret_is_kept():
+    questions = [q("PASSWORD", "password", required=True, default="")]
+    out = fill_recipe_answers(questions, {"PASSWORD": "caller-secret"})
+    assert out["secrets"] == {"PASSWORD": "caller-secret"}
+    assert out["unanswered_secrets"] == []
+    assert out["plain"] == {}
 
 
 def test_required_bool_and_list_are_filled_from_the_question():

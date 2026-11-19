@@ -12,8 +12,9 @@ name: vergeos_fill_answers
 short_description: Fill recipe answers from question metadata
 description:
   - Build the plain and secret answer dicts for one recipe.
-  - Credentials are returned under C(secrets) and must be passed through
-    the no_log C(answers) parameter. They are not for display.
+  - C(secrets) contains only credential values the caller already supplied.
+  - C(unanswered_secrets) names required credentials that were left unset.
+    This filter does not invent a password for them.
 options:
   _input:
     description: Answers already chosen, keyed by question name.
