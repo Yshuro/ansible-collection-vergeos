@@ -468,14 +468,29 @@ def narrow_no_log(module, resolved):
     module.no_log_values -= unmaskable
 
 
+def conceal_named_plain_secrets(module, plain):
+    """Hide plain_answers whose names already look like credentials.
+
+    No recipe lookup is required, so this runs before every failure return.
+    A password-typed question whose name does not match is concealed later,
+    once the question types are known.
+    """
+    values = [value for name, value in (plain or {}).items()
+              if looks_secret(name)]
+    conceal_secret_values(module, values)
+
+
 def combine_answers(module):
     """Merge ``plain_answers`` with the no_log ``answers`` mapping.
 
     A question named in both is refused. The values are not quoted back: one
     of them may be a password, and this runs before the recipe is known.
+    Names that already look like credentials are concealed first, so an
+    overlap, a login failure, or an unknown recipe cannot return them.
     """
     plain = module.params.get('plain_answers') or {}
     hidden = module.params.get('answers') or {}
+    conceal_named_plain_secrets(module, plain)
     overlap = sorted(set(plain) & set(hidden))
     if overlap:
         module.fail_json(

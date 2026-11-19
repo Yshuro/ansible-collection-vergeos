@@ -369,8 +369,44 @@ def test_a_credential_in_plain_answers_is_refused_and_concealed():
     assert 'plain_answers' in msg
     assert client.posts == []
     assert 'hunter2' in module.no_log_values
-    reg.assert_called_once()
-    assert 'hunter2' in set(reg.call_args[0][0])
+    assert 'web-01' not in module.no_log_values
+    registered = set()
+    for call in reg.call_args_list:
+        registered |= set(call.args[0])
+    assert 'hunter2' in registered
+
+
+def test_a_named_secret_is_concealed_before_the_recipe_is_known():
+    """A missing recipe fails before question types exist. The value must
+    already be hidden, or it rides out in the failure result."""
+    client = FakeClient()
+    with patch.object(vm_recipe_deploy, 'register_secrets') as reg:
+        module = run(client, no_log_values=set(), recipe='Nope',
+                     plain_answers={'PASSWORD': 'hunter2',
+                                    'HOSTNAME': 'web-01'})
+    msg = failed(module)['msg']
+    assert 'no recipe named' in msg
+    assert 'hunter2' not in msg
+    assert 'hunter2' in module.no_log_values
+    assert 'web-01' not in module.no_log_values
+    registered = set()
+    for call in reg.call_args_list:
+        registered |= set(call.args[0])
+    assert registered == {'hunter2'}
+
+
+def test_overlap_conceals_a_secret_that_was_also_passed_in_plain():
+    client = FakeClient(recipes=[RECIPE])
+    with patch.object(vm_recipe_deploy, 'register_secrets'):
+        module = run(client, no_log_values=set(),
+                     answers={'PASSWORD': 'from-answers'},
+                     plain_answers={'PASSWORD': 'from-plain'})
+    msg = failed(module)['msg']
+    assert 'PASSWORD' in msg
+    assert 'from-plain' not in msg
+    assert 'from-answers' not in msg
+    assert 'from-plain' in module.no_log_values
+    assert client.posts == []
 
 
 def test_a_secret_looking_name_in_plain_answers_is_refused():
