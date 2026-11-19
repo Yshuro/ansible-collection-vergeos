@@ -39,6 +39,9 @@ options:
       - Used for an ISO question only when that question has no list
         choices of its own and its type or table accepts a file.
       - The filter does not download, upload, or create a file.
+    type: list
+    elements: dict
+    required: false
   tiers:
     description:
       - Storage tier numbers present on the system, as C(site_info)
@@ -47,9 +50,6 @@ options:
       - The filter does not create a tier.
     type: list
     elements: int
-    required: false
-    type: list
-    elements: dict
     required: false
 '''
 
