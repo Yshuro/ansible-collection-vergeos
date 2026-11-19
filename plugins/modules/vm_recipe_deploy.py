@@ -62,7 +62,9 @@ options:
         default. A value above zero and under 1 MB (1048576) is refused,
         because a number like C(50) is fifty bytes. The recipe then builds
         the OS drive at the image size and still reports success. 50 GB is
-        C(53687091200).
+        C(53687091200). A question whose own minimum, maximum, or default
+        is itself under 1 MB is a byte count the recipe published, such as
+        a block size of 65536, and that value is accepted.
       - A C(list) question that carries its own choices (for example
         C(YB_IP_ADDR_TYPE) with C(dhcp) and C(static)) is checked locally.
         The value has to be the choice's key, not the label the UI shows.

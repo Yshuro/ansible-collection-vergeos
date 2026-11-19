@@ -29,6 +29,10 @@
 #
 # A recipe whose name starts with "Dev " is not customer-facing. It is not
 # simulated. The matrix reports SKIPPED and counts it as expected.
+#
+# An Install ISO question is answered with a file that already exists.
+# The listing is read-only. Nothing is uploaded. With no ISO on the
+# system the recipe is BLOCKED.
 - name: Recipe matrix live ladder
   hosts: localhost
   gather_facts: false
@@ -178,6 +182,14 @@
     # plain_answers is not no_log. answers is. The filler does not invent a
     # credential. This check-mode task supplies the scratch value for the
     # names it left unset, and does not print that dict.
+    - name: "1b. Read existing ISO files, without uploading any"
+      vergeio.vergeos.file_info:
+        insecure: true
+        file_type: iso
+      register: matrix_isos
+      check_mode: true
+      changed_when: false
+
     - name: "2. Simulate each downloaded recipe in check mode"
       vergeio.vergeos.vm_recipe_deploy:
         insecure: true
@@ -199,7 +211,8 @@
         filled: >-
           {{ supplied | vergeio.vergeos.vergeos_fill_answers(
                item.questions | default([]),
-               item.options | default({})) }}
+               item.options | default({}),
+               matrix_isos.files | default([])) }}
       check_mode: true
       ignore_errors: true  # noqa: ignore-errors -- a refusal is data, recorded in failed
       register: matrix_runs
@@ -248,7 +261,8 @@
                     | combine(matrix_overrides[nm] | default({})) -%}
               {%- set filled = supplied | vergeio.vergeos.vergeos_fill_answers(
                     r.item.questions | default([]),
-                    r.item.options | default({})) -%}
+                    r.item.options | default({}),
+                    matrix_isos.files | default([])) -%}
               {%- set unfilled = filled.unfilled | default([]) -%}
               {%- set refused = r.failed | default(false) -%}
               {%- set ok = (not refused)
@@ -258,8 +272,7 @@
               {%- set detail = (r.simulate_result | default({})).errors | default([])
                                or [r.msg | default('refused before simulate')] -%}
               {%- if unfilled | length > 0 -%}
-                {%- set detail = ['no choices for required question '
-                      ~ ((unfilled | map(attribute='display') | list) | join(', '))] -%}
+                {%- set detail = unfilled | map(attribute='reason') | list -%}
               {%- endif -%}
               {%- set sent = (r.answers_sent | default([])) | join(', ') -%}
               {%- set line = (('PASS    ' if ok else

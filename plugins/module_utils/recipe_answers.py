@@ -365,7 +365,10 @@ def check_constraints(name, question, value):
         # The gate that was missing: a whole number still went through, so
         # YB_DRIVE_OS_SIZE: 50 was fifty bytes. The recipe built the OS drive
         # at the image size and the deploy reported success. Zero stays.
-        if qtype == "disksize" and 0 < value < _DISKSIZE_MIN_BYTES:
+        # A question that publishes a size under 1 MB (BLOCKSIZE 65536 is
+        # 64 KiB) is a byte count, not a drive written in the wrong unit.
+        if (qtype == "disksize" and 0 < value < _DISKSIZE_MIN_BYTES
+                and not _disksize_accepts_sub_megabyte(question)):
             errors.append(_disksize_answer_error(name, value))
         return errors
 
@@ -508,6 +511,24 @@ def recipe_not_applicable(value, message=None):
     return flag is False or flag in (0, "0", "false", "False")
 
 
+def _disksize_accepts_sub_megabyte(question):
+    """True when this question's own min, max, or default is under 1 MB.
+
+    The 1 MB floor catches an OS-drive size written in the wrong unit: 50
+    was sent as fifty bytes. BLOCKSIZE on the filesystem test is the same
+    type and a different quantity. Its published default is 65536, which is
+    64 KiB. Refusing that default was the validator. The filler was already
+    sending the question's own value.
+    """
+    for raw in (question.get("min"), question.get("default"), question.get("max")):
+        if not _is_int(raw):
+            continue
+        number = int(raw)
+        if 0 < number < _DISKSIZE_MIN_BYTES:
+            return True
+    return False
+
+
 def _numeric_floor(question):
     """The smallest value worth sending for a required numeric question.
 
@@ -575,7 +596,9 @@ def _default_is_concrete(question, options):
     ``vm_recipe_info`` writes ``VALUE_SPECIFIED_IN_NO_LOG_PARAMETER`` over a
     credential default, and other cores print ``$REDACTED$`` or asterisks.
     A list or table default counts only when it is one of the choices, or an
-    http URL the recipe downloads itself.
+    http URL the recipe downloads itself. An ISO question is the exception:
+    the platform wants a file that already exists, and a download URL is
+    not that file.
     """
     default = question.get("default")
     if _blankish(default) or _is_no_log_placeholder(default):
@@ -593,6 +616,15 @@ def _default_is_concrete(question, options):
             key = row.get("$key")
             if key is not None:
                 keys.add(str(key))
+        if _is_iso_question(question):
+            # A download URL is how the Windows recipes name an image that
+            # is not on the system yet. The platform rejects it for an
+            # Install ISO that has to already be a file. The caller can
+            # still pass the URL; the filler will not invent that send.
+            chosen = _iso_answer(question, options, None)
+            if chosen is not None and str(chosen) == str(default):
+                return True
+            return str(default) in inline
         if str(default) in keys:
             return True
         if isinstance(default, str) and (
@@ -613,7 +645,67 @@ def _choice_fill(question, options):
     return rows[0].get("$key")
 
 
-def _fill_missing(question, options):
+def _is_iso_question(question):
+    """A list or table question whose answer is an ISO file."""
+    qtype = question.get("type")
+    if qtype != "list" and qtype not in TABLE_BACKED_TYPES:
+        return False
+    if str(question.get("table") or "") == "files":
+        return True
+    blob = "%s %s" % (question.get("name") or "", question.get("display") or "")
+    return "iso" in blob.lower()
+
+
+def _iso_row_answer(row):
+    """The file key (or name) of an ISO row, or None."""
+    if not isinstance(row, dict):
+        return None
+    kind = str(row.get("type") or "").lower()
+    texts = []
+    for field in ("name", "$display", "filename"):
+        text = row.get(field)
+        if isinstance(text, str):
+            texts.append(text.strip().lower())
+    if kind != "iso" and not any(text.endswith(".iso") for text in texts):
+        return None
+    if row.get("$key") is not None:
+        return row.get("$key")
+    for field in ("name", "filename"):
+        text = row.get(field)
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+    return None
+
+
+def _first_iso_answer(rows, preferred=None):
+    """First ISO in ``rows``, preferring one the question already names."""
+    found = None
+    for row in rows or []:
+        answer = _iso_row_answer(row)
+        if answer is None:
+            continue
+        if preferred is not None and str(answer) == str(preferred):
+            return answer
+        if found is None:
+            found = answer
+    return found
+
+
+def _iso_answer(question, options, files):
+    """An existing ISO for this question, or None.
+
+    The question's own option rows win. A read-only file listing is the
+    fallback. A download URL is not an ISO on this system.
+    """
+    rows = (options or {}).get(question.get("name")) or []
+    preferred = question.get("default")
+    choice = _first_iso_answer(rows, preferred)
+    if choice is not None:
+        return choice
+    return _first_iso_answer(files, preferred)
+
+
+def _fill_missing(question, options, files=None):
     """A value for a question the caller did not answer, or a sentinel.
 
     ``_MISSING`` means leave it to the platform. ``_UNFILLED`` means a
@@ -621,8 +713,10 @@ def _fill_missing(question, options):
     can be sent.
 
     A required question is answered explicitly. A default that merely names a
-    settings row is not an answer, and a list or ISO default is not an answer
-    unless it is one of the choices or a download URL. A timezone question
+    settings row is not an answer, and a list default is not an answer unless
+    it is one of the choices or a download URL. An ISO question is answered
+    with an existing file, from its options or from a read-only file list.
+    A timezone question
     whose default is not a real zone is sent as UTC even when optional,
     because the recipe script otherwise runs that command with the bad
     default. A numeric default below the question minimum is raised to it.
@@ -651,6 +745,14 @@ def _fill_missing(question, options):
     if _is_credential_question(question, name):
         return _MISSING
 
+    if _is_iso_question(question):
+        if concrete:
+            return question.get("default")
+        choice = _iso_answer(question, options, files)
+        if choice is None:
+            return _UNFILLED
+        return choice
+
     if concrete:
         default = question.get("default")
         if qtype in NUMERIC_TYPES:
@@ -674,7 +776,18 @@ def _fill_missing(question, options):
     return _MISSING
 
 
-def fill_recipe_answers(questions, answers, options=None):
+def _unfilled_item(question):
+    """Why a required choice was left unset."""
+    name = question.get("name")
+    display = question.get("display") or name
+    if _is_iso_question(question):
+        reason = "no existing ISO for required question '%s'" % display
+    else:
+        reason = "no choices for required question '%s'" % display
+    return {"name": name, "display": display, "reason": reason}
+
+
+def fill_recipe_answers(questions, answers, options=None, files=None):
     """Complete an answer set from the recipe's own questions.
 
     Returns ``plain``, ``secrets``, and ``unanswered_secrets``.
@@ -685,7 +798,10 @@ def fill_recipe_answers(questions, answers, options=None):
     ``unanswered_secrets`` names required credentials that were left unset,
     whether or not a default was published.
     This function does not invent a password. ``unfilled`` names required
-    choices that have no options and no usable default.
+    choices that have no options and no usable default. ``files`` is a
+    read-only listing of files already on the system. An ISO question
+    with no ISO in its own options uses that listing, and is left
+    unfilled when neither has one. Nothing is uploaded.
 
     Supplied answers are kept, including ones whose question is internal.
     Supplied numeric answers below the question minimum are raised to that
@@ -726,12 +842,9 @@ def fill_recipe_answers(questions, answers, options=None):
         question = by_name[name]
         if is_internal(question) or question.get("enabled") is False:
             continue
-        filled = _fill_missing(question, options)
+        filled = _fill_missing(question, options, files)
         if filled is _UNFILLED:
-            unfilled.append({
-                "name": name,
-                "display": question.get("display") or name,
-            })
+            unfilled.append(_unfilled_item(question))
             continue
         if filled is _MISSING:
             if (question.get("required")

@@ -33,6 +33,14 @@ options:
     description: Valid values for table-backed questions, keyed by question name.
     type: dict
     required: false
+  files:
+    description:
+      - Files already on the system, as C(file_info) returns them.
+      - An ISO question with no ISO in its own options uses this list.
+      - The filter does not upload or create a file.
+    type: list
+    elements: dict
+    required: false
 '''
 
 EXAMPLES = r'''
@@ -54,8 +62,8 @@ from ansible_collections.vergeio.vergeos.plugins.module_utils.recipe_answers imp
 )
 
 
-def _fill(answers, questions, options=None):
-    return fill_recipe_answers(questions, answers, options)
+def _fill(answers, questions, options=None, files=None):
+    return fill_recipe_answers(questions, answers, options, files)
 
 
 class FilterModule(object):

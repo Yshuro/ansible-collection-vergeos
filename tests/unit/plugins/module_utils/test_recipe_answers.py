@@ -805,16 +805,94 @@ def test_required_iso_with_no_choices_is_unfilled():
                    table="files", display="Install ISO")]
     out = fill_recipe_answers(questions, {}, {"INSTALL_ISO": []})
     assert "INSTALL_ISO" not in out["plain"]
-    assert out["unfilled"] == [{"name": "INSTALL_ISO", "display": "Install ISO"}]
+    assert out["unfilled"] == [{
+        "name": "INSTALL_ISO",
+        "display": "Install ISO",
+        "reason": "no existing ISO for required question 'Install ISO'",
+    }]
 
 
-def test_required_iso_download_url_default_is_sent():
-    questions = [q("WINDOWS_ISO", "list", required=True,
-                   default="https://example.invalid/windows.iso",
-                   table="files", display="Windows ISO")]
-    out = fill_recipe_answers(questions, {}, {"WINDOWS_ISO": []})
-    assert out["plain"]["WINDOWS_ISO"] == "https://example.invalid/windows.iso"
+def test_required_iso_download_url_is_not_sent():
+    """A download URL is not a file on this system.
+
+    The platform rejected that send for Install ISO. A caller can still
+    pass the URL, which is how the Windows recipes name an image.
+    """
+    questions = [q("INSTALL_ISO", "list", required=True,
+                   default="https://example.invalid/vergeos.iso",
+                   table="files", display="Install ISO")]
+    out = fill_recipe_answers(questions, {}, {"INSTALL_ISO": []})
+    assert "INSTALL_ISO" not in out["plain"]
+    assert out["unfilled"][0]["reason"].startswith("no existing ISO")
+    supplied = fill_recipe_answers(
+        questions, {"INSTALL_ISO": "https://example.invalid/vergeos.iso"},
+        {"INSTALL_ISO": []})
+    assert supplied["plain"]["INSTALL_ISO"] == "https://example.invalid/vergeos.iso"
+    assert supplied["unfilled"] == []
+
+
+def test_install_iso_uses_an_iso_file_not_another_row():
+    questions = [q("INSTALL_ISO", "list", required=True, default="",
+                   table="files", display="Install ISO")]
+    options = {"INSTALL_ISO": [
+        {"$key": 3, "name": "disk.raw", "type": "raw"},
+        {"$key": 9, "name": "vergeos.iso", "$display": "vergeos.iso",
+         "type": "iso"},
+    ]}
+    out = fill_recipe_answers(questions, {}, options)
+    assert out["plain"]["INSTALL_ISO"] == 9
     assert out["unfilled"] == []
+
+
+def test_install_iso_uses_a_read_only_file_listing():
+    """No option rows. The check-mode matrix passes file_info's ISO list."""
+    questions = [q("INSTALL_ISO", "list", required=True, default="",
+                   table="files", display="Install ISO")]
+    files = [{"$key": 12, "name": "verge-io-install.iso", "type": "iso"}]
+    out = fill_recipe_answers(questions, {}, {"INSTALL_ISO": []}, files)
+    assert out["plain"]["INSTALL_ISO"] == 12
+    assert out["unfilled"] == []
+
+
+def test_install_iso_prefers_the_question_options_over_the_listing():
+    questions = [q("INSTALL_ISO", "list", required=True, default="",
+                   table="files", display="Install ISO")]
+    options = {"INSTALL_ISO": [
+        {"$key": 4, "name": "recipe.iso", "type": "iso"},
+    ]}
+    files = [{"$key": 9, "name": "other.iso", "type": "iso"}]
+    out = fill_recipe_answers(questions, {}, options, files)
+    assert out["plain"]["INSTALL_ISO"] == 4
+
+
+def test_blocksize_default_is_a_valid_disksize():
+    """Filesystem Performance Test publishes BLOCKSIZE 65536.
+
+    disksize is bytes. The 1 MB floor refuses a drive size of 50, which
+    is fifty bytes. It was wrong for this question: 65536 is 64 KiB, the
+    block size the recipe itself publishes. The filler already sent that
+    default. The validator now accepts it.
+    """
+    question = q("BLOCKSIZE", "disksize", required=True, default="65536",
+                 min=512, max=0, display="Block Size")
+    filled = fill_recipe_answers([question], {})
+    assert filled["plain"]["BLOCKSIZE"] == 65536
+    out = resolve_answers([question], filled["plain"])
+    assert out["errors"] == [], " ".join(out["errors"])
+    assert out["answers"]["BLOCKSIZE"] == 65536
+
+
+def test_drive_size_of_fifty_is_still_refused():
+    """The 1 MB floor stays for a drive whose own bounds are not that small."""
+    question = q("YB_DRIVE_OS_SIZE", "disksize", required=True, default="0",
+                 min=0, max=0)
+    out = resolve_answers([question], {"YB_DRIVE_OS_SIZE": 50})
+    assert out["errors"]
+    assert "bytes" in " ".join(out["errors"])
+    filled = fill_recipe_answers([question], {})
+    assert filled["plain"]["YB_DRIVE_OS_SIZE"] == 1048576
+    accepted = resolve_answers([question], filled["plain"])
+    assert accepted["errors"] == []
 
 
 def test_optional_empty_question_is_not_filled():
