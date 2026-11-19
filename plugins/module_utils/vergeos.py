@@ -256,6 +256,65 @@ def cloudinit_file_needs_update(client, file_key, contents, stored_render,
             != _normalize_cloudinit_render(desired_render))
 
 
+def coerce_platform_key(value):
+    """Return an int when ``value`` is an integer key or a decimal string.
+
+    ``True`` and ``False`` are ints in Python and are not resource keys, so
+    they are returned unchanged. ``None``, a name, or any other non-numeric
+    value is returned unchanged.
+    """
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if text.isdigit() or (
+                len(text) > 1 and text[0] == '-' and text[1:].isdigit()):
+            return int(text)
+    return value
+
+
+def platform_key(obj):
+    """The object's key, preferring ``.key`` when that value is a real key.
+
+    ``ResourceObject.key`` returns ``int($key)``. Reading the same row as a
+    dict returns whatever the API sent. On some pyVergeOS and VergeOS 26.2
+    combinations a network's raw ``$key`` is the string ``"22"`` while a
+    NIC's ``vnet`` is the int ``22`` (pyVergeOS #205). ``.key`` is already
+    the integer, so a comparison that uses it matches. A plain dict, or an
+    object whose ``.key`` is missing or not numeric, falls back to ``$key``
+    and the same coercion (#216).
+    """
+    try:
+        candidate = obj.key
+    except (AttributeError, ValueError, TypeError):
+        candidate = None
+    coerced = coerce_platform_key(candidate)
+    if isinstance(coerced, int) and not isinstance(coerced, bool):
+        return coerced
+    try:
+        raw = dict(obj).get('$key')
+    except (TypeError, ValueError):
+        raw = None
+    if raw is None:
+        return None
+    return coerce_platform_key(raw)
+
+
+def same_platform_key(left, right):
+    """True when both sides name the same row.
+
+    A numeric string and an int are the same key. ``"22"`` matches ``22``.
+    A bool is not a key, so it does not match ``0`` or ``1``.
+    """
+    a = coerce_platform_key(left)
+    b = coerce_platform_key(right)
+    if isinstance(a, bool) or isinstance(b, bool):
+        return isinstance(a, bool) and isinstance(b, bool) and a is b
+    return a == b
+
+
 def alias_platform_key(row):
     """Copy the platform identifier ``$key`` onto ``key``.
 
