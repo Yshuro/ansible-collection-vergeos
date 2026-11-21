@@ -10,6 +10,7 @@ DOCUMENTATION = r'''
 ---
 name: vergeos_fill_answers
 short_description: Fill recipe answers from question metadata
+version_added: "2.3.0"
 description:
   - Build the plain and secret answer dicts for one recipe.
   - C(secrets) contains only credential values the caller already supplied.
@@ -67,9 +68,7 @@ _value:
 '''
 
 from ansible_collections.vergeio.vergeos.plugins.module_utils.recipe_answers import (
-    drive_tier_has_no_question,
     fill_recipe_answers,
-    recipe_not_applicable,
 )
 
 
@@ -77,16 +76,10 @@ def _fill(answers, questions, options=None, files=None, tiers=None):
     return fill_recipe_answers(questions, answers, options, files, tiers)
 
 
-def _tier_gap(message, questions):
-    return drive_tier_has_no_question(questions, message)
-
-
-class FilterModule(object):
-    """Recipe-matrix helpers."""
+class FilterModule:
+    """Fill recipe answers filter."""
 
     def filters(self):
         return {
             'vergeos_fill_answers': _fill,
-            'vergeos_not_applicable': recipe_not_applicable,
-            'vergeos_tier_step_unanswered': _tier_gap,
         }

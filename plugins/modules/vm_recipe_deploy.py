@@ -132,6 +132,7 @@ options:
         because this parameter is not C(no_log). Pass it in O(answers).
     type: dict
     default: {}
+    version_added: "2.3.0"
   prune_unknown:
     description:
       - Drop and report answers this recipe does not define, instead of failing.
