@@ -220,6 +220,70 @@ def test_blank_macs_do_not_collide_with_each_other():
     assert all(r["verdict"] == "approve" for r in v["results"])
 
 
+def test_existing_nics_from_vm_nic_info_is_refused_on_different_vm():
+    """vm_nic_info returns macaddress, machine, and vnet_name."""
+    existing = [{
+        "$key": 1,
+        "name": "eth0",
+        "vnet": 3,
+        "vnet_name": "External",
+        "macaddress": "52:54:00:11:22:33",
+        "machine": 18,
+    }]
+    d = decision(vm="web01", mac="52:54:00:11:22:33")
+    v = netguard.assess(make_plan([d]), {"web01": "stopped"},
+                        existing, options={"attach_mode": "live"})
+    r = one(v)
+    assert r["verdict"] == "refuse"
+    assert "18" in r["why"]
+    assert "External" in r["why"]
+    assert "already exists in VergeOS" in r["why"]
+
+
+def test_existing_nics_from_vm_nic_info_is_idempotent_on_same_vm():
+    existing = [{
+        "macaddress": "52:54:00:11:22:33",
+        "machine": "web01",
+        "vnet_name": "External",
+    }]
+    d = decision(vm="web01", mac="52:54:00:11:22:33")
+    v = netguard.assess(make_plan([d]), {"web01": "stopped"},
+                        existing, options={"attach_mode": "live"})
+    assert one(v)["verdict"] == "approve"
+
+
+def test_existing_nic_without_vm_name_is_refused():
+    """A row with a MAC and no VM name cannot be confirmed as the same VM.
+    Absence of evidence is not evidence of absence."""
+    existing = [{"macaddress": "AA:BB:CC:DD:EE:01", "vnet_name": "prod-web"}]
+    v = netguard.assess(make_plan([decision()]), {"web01": "stopped"},
+                        existing, options={"attach_mode": "live"})
+    r = one(v)
+    assert r["verdict"] == "refuse"
+    assert "prod-web" in r["why"]
+    assert "already exists in VergeOS" in r["why"]
+
+
+def test_existing_nic_with_only_mac_is_refused():
+    existing = [{"mac": "AA:BB:CC:DD:EE:01"}]
+    v = netguard.assess(make_plan([decision()]), {"web01": "stopped"},
+                        existing, options={"attach_mode": "live"})
+    r = one(v)
+    assert r["verdict"] == "refuse"
+    assert r["why"] == "MAC AA:BB:CC:DD:EE:01 already exists in VergeOS; attaching would duplicate it"
+
+
+def test_index_existing_nics_key_variations():
+    indexed = netguard.index_existing_nics([
+        {"macaddress": "52-54-00-11-22-33", "machine": 42, "vnet_name": "vnet-a"},
+        {"mac_address": "52:54:00:11:22:44", "vm_name": "db01", "network": "vnet-b"},
+        {"mac": "52:54:00:11:22:55", "vnet": 5},
+    ])
+    assert indexed["52:54:00:11:22:33"] == [{"vm": "42", "network": "vnet-a"}]
+    assert indexed["52:54:00:11:22:44"] == [{"vm": "db01", "network": "vnet-b"}]
+    assert indexed["52:54:00:11:22:55"] == [{"vm": "", "network": "5"}]
+
+
 # ------------------------------------------------- upstream interaction
 def test_upstream_refusal_is_not_rehabilitated():
     d = decision(action="refuse", target=None)
