@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`network_guard`: `existing_nics` accepts `vm_nic_info` output and unconfirmed MACs** (#234). `index_existing_nics()` only read `mac_address` or `mac` together with `vm_name` or `vm`. When `vm_nic_info` output was passed, its rows (which use `macaddress`, `machine`, and `vnet_name`) were skipped, allowing duplicate MACs to be approved on live attachments. `index_existing_nics()` now recognizes `macaddress`, `machine` (as VM identifier), and `vnet_name`. Furthermore, an existing NIC whose VM name is unspecified or unconfirmed is refused rather than treated as absent evidence of conflict.
+
 - **Each recipe filter has its own documentation** (#226). `ansible-doc` shows the description, arguments, and return value for `vergeos_not_applicable` and `vergeos_tier_step_unanswered`. Filter documentation carries `version_added` 2.3.0.
 
 - **`catalog`: a string repository key and an integer catalog `repository` match the same repository.** `find_catalogs()` compared `dict(c).get('repository')` with `repo_key` using `==`. On VergeOS 26.2, repository row keys can be returned as decimal strings, preventing `find_catalogs()` from matching an existing catalog in that repository and causing `state: present` to attempt duplicate creation or `state: absent` to miss deletion. `resolve_repository_key()` and `find_catalogs()` coerce repository keys with `coerce_platform_key()`, and creation writes the coerced integer key.

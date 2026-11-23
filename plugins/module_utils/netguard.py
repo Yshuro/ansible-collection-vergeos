@@ -65,12 +65,28 @@ def index_existing_nics(nics):
     """Map MAC -> list of {vm, network} already present in VergeOS."""
     out = {}
     for entry in nics or []:
-        mac = normalise_mac(entry.get("mac_address") or entry.get("mac"))
+        mac = normalise_mac(
+            entry.get("mac_address")
+            or entry.get("mac")
+            or entry.get("macaddress")
+        )
         if not mac:
             continue
+        vm = ""
+        for k in ("vm_name", "vm", "machine_name", "machine"):
+            val = entry.get(k)
+            if val is not None and val != "":
+                vm = str(val)
+                break
+        network = ""
+        for k in ("network", "vnet_name", "vnet"):
+            val = entry.get(k)
+            if val is not None and val != "":
+                network = str(val)
+                break
         out.setdefault(mac, []).append({
-            "vm": entry.get("vm_name") or entry.get("vm") or "",
-            "network": entry.get("network") or entry.get("vnet") or "",
+            "vm": vm,
+            "network": network,
         })
     return out
 
@@ -227,13 +243,22 @@ def _gate(decision, context):
         seen_macs[mac] = (vm, decision.get("nic"))
 
     # Same MAC already live in VergeOS on a different VM. Re-running
-    # against the same VM is idempotent and allowed.
+    # against the same VM is idempotent and allowed. An existing MAC
+    # whose VM is unknown cannot be confirmed as the same VM, so it
+    # is refused -- absence of evidence is not evidence of absence.
     for holder in existing.get(mac, []):
-        if holder["vm"] and holder["vm"] != vm:
-            return out("refuse", None,
-                       "MAC %s already exists in VergeOS on VM %r "
-                       "(network %r); attaching would duplicate it"
-                       % (mac, holder["vm"], holder["network"]))
+        if holder["vm"] and holder["vm"] == vm:
+            continue
+        location = ""
+        if holder["vm"] and holder["network"]:
+            location = " on VM %r (network %r)" % (holder["vm"], holder["network"])
+        elif holder["vm"]:
+            location = " on VM %r" % holder["vm"]
+        elif holder["network"]:
+            location = " (network %r)" % holder["network"]
+        return out("refuse", None,
+                   "MAC %s already exists in VergeOS%s; attaching would duplicate it"
+                   % (mac, location))
 
     if mode == "detached":
         return out("approve", None,

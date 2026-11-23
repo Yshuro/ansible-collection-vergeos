@@ -44,6 +44,12 @@ options:
       - NICs that already exist in VergeOS, as a read-only list. A MAC
         owned by a different VM is a refusal. Re-reading the same VM is
         not a conflict.
+      - Accepts the output of M(vergeio.vergeos.vm_nic_info) (keys
+        C(macaddress), C(machine), C(vnet_name) or C(vnet)), as well as
+        generic rows with C(mac_address) or C(mac), C(vm_name) or C(vm),
+        and C(network).
+      - If a row contains a MAC address without a VM identifier, it is
+        treated as an unconfirmed VM conflict and refused.
     type: list
     elements: dict
   attach_mode:
