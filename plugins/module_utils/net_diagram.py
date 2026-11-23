@@ -176,7 +176,11 @@ def _topology_graph(topology, nics=None):
 def _segment_label(seg_id, facts):
     bits = [seg_id]
     if facts.get("tag") is not None:
-        bits.append("vlan %s" % facts["tag"])
+        zone_type = (facts.get("sdn_zone_type") or "").strip().lower()
+        if zone_type in ("vxlan", "evpn"):
+            bits.append("vxlan %s" % facts["tag"])
+        else:
+            bits.append("vlan %s" % facts["tag"])
     if facts.get("cidr"):
         bits.append(facts["cidr"])
     if facts.get("alias"):

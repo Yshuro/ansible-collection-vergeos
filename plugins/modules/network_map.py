@@ -26,7 +26,9 @@ description:
     set, otherwise C(layer2_id). A VXLAN network's C(layer2_id) is a
     VXLAN id and is left unmatched. When C(layer2_type) is absent,
     C(layer2_id) is left unused and an explicit C(vlan_id) (or C(vlan)
-    / C(vlanid)) still matches.
+    / C(vlanid)) still matches. On the Proxmox source side, an SDN vnet in a
+    VXLAN or EVPN zone carries a VXLAN ID, which is left unmatched by the
+    C(vlan) resolver.
   - The C(name) resolver matches a tagged access port, such as
     C(vmbr7.3001), by its segment or SDN vnet. The bare bridge name is
     reserved for the untagged bridge segment.

@@ -77,6 +77,7 @@ def r_alias(nic, facts, inv, policy):
 
 
 _EXPLICIT_VLAN_KEYS = ("vlan_id", "vlan", "vlanid")
+_OVERLAY_ZONE_TYPES = frozenset({"vxlan", "evpn"})
 
 
 def _layer2_type(net):
@@ -85,6 +86,29 @@ def _layer2_type(net):
         return None
     text = raw.strip().lower()
     return text or None
+
+
+def _is_overlay_zone(facts):
+    raw = (facts or {}).get("sdn_zone_type")
+    if not isinstance(raw, str):
+        return False
+    return raw.strip().lower() in _OVERLAY_ZONE_TYPES
+
+
+def source_vlan_id(nic, facts):
+    """VLAN tag of a source NIC, or None.
+
+    A NIC's explicit ``tag`` is always a VLAN tag. When the NIC carries
+    no tag of its own, the tag is inherited from segment facts only
+    when the segment is not a VXLAN or EVPN overlay. On a VXLAN or EVPN
+    SDN vnet, ``tag`` is the VXLAN ID, not a VLAN tag.
+    """
+    vlan = (nic or {}).get("tag")
+    if vlan is not None:
+        return _as_vlan_number(vlan)
+    if not facts or _is_overlay_zone(facts):
+        return None
+    return _as_vlan_number(facts.get("tag"))
 
 
 def _as_vlan_number(value):
@@ -127,9 +151,7 @@ def vlan_id_for_match(net):
 
 
 def r_vlan(nic, facts, inv, policy):
-    vlan = nic.get("tag")
-    if vlan is None:
-        vlan = (facts or {}).get("tag")
+    vlan = source_vlan_id(nic, facts)
     if vlan is None:
         return None
     if nic.get("trunks"):
@@ -150,9 +172,7 @@ def _tagged_access(nic, facts):
     The bare bridge is a separate layer-2 domain. Trunks are refused
     before resolvers run.
     """
-    if nic.get("tag") is not None:
-        return True
-    if (facts or {}).get("tag") is not None:
+    if source_vlan_id(nic, facts) is not None:
         return True
     bridge = nic.get("bridge") or ""
     segment = nic.get("segment") or ""
@@ -204,13 +224,13 @@ def _synthesis_refused(nic, facts, floor):
 
 
 def _synthesis_name(nic, facts, cfg):
-    vlan = nic.get("tag") if nic.get("tag") is not None else (facts.get("tag") or "")
+    vlan = source_vlan_id(nic, facts)
     name = cfg.get("name_template", "{segment}").format(
         segment=nic.get("segment") or "",
         bridge=nic.get("bridge") or "",
-        vlan=vlan,
-        alias=facts.get("alias") or "",
-        vnet=facts.get("sdn_vnet") or "")
+        vlan="" if vlan is None else vlan,
+        alias=(facts or {}).get("alias") or "",
+        vnet=(facts or {}).get("sdn_vnet") or "")
     return name.strip("-. ")
 
 
@@ -287,7 +307,7 @@ def r_synthesize(nic, facts, inv, policy):
             "network_type %r is not a VergeOS vnet type (%s); VLANs are "
             "expressed with layer2_type, not a type"
             % (ntype, ", ".join(VNET_TYPES)))
-    vlan = nic.get("tag") if nic.get("tag") is not None else facts.get("tag")
+    vlan = source_vlan_id(nic, facts)
     spec = {"name": name, "state": "present", "network_type": ntype}
     if vlan is not None:
         spec["layer2_type"] = "vlan"

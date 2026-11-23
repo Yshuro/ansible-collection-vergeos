@@ -162,6 +162,86 @@ def test_low_vlan_tags_do_not_map_onto_vxlan_core_and_dmz():
         ("map", "prod-web", "vlan")
 
 
+def test_vxlan_and_evpn_sdn_zone_tags_do_not_map_onto_vlan():
+    """#238: In Proxmox SDN, a vnet's tag in a VXLAN or EVPN zone is a VXLAN ID,
+    not a VLAN tag. Overlay NICs must not be matched as VLANs against VergeOS
+    VLAN networks."""
+    inventory = [
+        {"name": "vlan-3001", "layer2_type": "vlan", "layer2_id": 3001},
+    ]
+    segs = {
+        "vlnet1": {"sdn_zone_type": "vlan", "tag": 3001, "sdn_vnet": "vlnet1"},
+        "vxnet1": {"sdn_zone_type": "vxlan", "tag": 3001, "sdn_vnet": "vxnet1"},
+        "evnet1": {"sdn_zone_type": "evpn", "tag": 3001, "sdn_vnet": "evnet1"},
+    }
+    nics = [
+        nic(key="net0", mac="AA:BB:CC:00:01:01", segment="vlnet1", tag=None, bridge="vlnet1"),
+        nic(key="net1", mac="AA:BB:CC:00:01:02", segment="vxnet1", tag=None, bridge="vxnet1"),
+        nic(key="net2", mac="AA:BB:CC:00:01:03", segment="evnet1", tag=None, bridge="evnet1"),
+    ]
+    decisions = {d["nic"]: d for d in run(nics, segs, inventory)["decisions"]}
+
+    # net0 is on a VLAN zone with tag 3001 -> correctly maps to VLAN 3001
+    assert (decisions["net0"]["action"], decisions["net0"]["target"], decisions["net0"]["resolver"]) == \
+        ("map", "vlan-3001", "vlan")
+
+    # net1 is on a VXLAN zone with tag 3001 (VXLAN ID) -> must NOT map by vlan
+    assert decisions["net1"]["action"] == "refuse"
+    assert decisions["net1"]["target"] is None
+    assert "matches an existing vnet" not in decisions["net1"]["why"]
+
+    # net2 is on an EVPN zone with tag 3001 (VXLAN ID) -> must NOT map by vlan
+    assert decisions["net2"]["action"] == "refuse"
+    assert decisions["net2"]["target"] is None
+    assert "matches an existing vnet" not in decisions["net2"]["why"]
+
+
+def test_vxlan_and_evpn_sdn_zone_synthesis_does_not_set_vlan_id():
+    """#238: Synthesizing a VXLAN or EVPN vnet must not declare layer2_type: vlan or vlan_id."""
+    segs = {
+        "vxnet1": {
+            "source": "sdn",
+            "confidence": "authoritative",
+            "sdn_zone_type": "vxlan",
+            "tag": 3001,
+            "sdn_vnet": "vxnet1",
+            "cidr": "10.10.1.0/24",
+            "gateway": "10.10.1.1",
+        },
+        "evnet1": {
+            "source": "sdn",
+            "confidence": "authoritative",
+            "sdn_zone_type": "evpn",
+            "tag": 3001,
+            "sdn_vnet": "evnet1",
+            "cidr": "10.10.2.0/24",
+            "gateway": "10.10.2.1",
+        },
+    }
+    nics = [
+        nic(key="net1", segment="vxnet1", tag=None, bridge="vxnet1"),
+        nic(key="net2", segment="evnet1", tag=None, bridge="evnet1"),
+    ]
+    p = {"order": ["synthesize"]}
+    r = run(nics, segs, [], p)
+    for create in r["creates"]:
+        assert "layer2_type" not in create
+        assert "vlan_id" not in create
+
+
+def test_tagged_vm_nic_on_vxlan_overlay_still_matches_its_own_vlan_tag():
+    """An explicit tag on the VM NIC is a VLAN tag even on an overlay vnet."""
+    inventory = [
+        {"name": "vlan-20", "layer2_type": "vlan", "layer2_id": 20},
+    ]
+    segs = {
+        "vxnet1": {"sdn_zone_type": "vxlan", "tag": 3001, "sdn_vnet": "vxnet1"},
+    }
+    n = nic(key="net0", segment="vxnet1.20", tag=20, bridge="vxnet1")
+    d = only(run([n], segs, inventory, {"order": ["vlan"]}))
+    assert (d["action"], d["target"], d["resolver"]) == ("map", "vlan-20", "vlan")
+
+
 def test_map_to_existing_by_vlan():
     p = {"order": ["vlan"]}
     d = only(run([nic()], AUTHORITATIVE, INVENTORY, p))

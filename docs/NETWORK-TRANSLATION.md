@@ -60,6 +60,14 @@ may be a VXLAN id on a row that omitted the type. An explicit `vlan_id`
 still matches in that case, as do the `vlan` and `vlanid` spellings.
 Those fields name a VLAN id.
 
+On the Proxmox source side, an SDN vnet in a `vxlan` or `evpn` zone
+carries a VXLAN id in its `tag` field, not a VLAN tag. That number stays
+out of `vlan` matching so an overlay NIC is not planned onto an
+unrelated VergeOS VLAN network with the same number. Synthesis also keeps
+`vlan_id` and `layer2_type: vlan` off proposed vnets for overlay segments.
+An explicit `tag` on the VM's NIC remains a VLAN tag even on an overlay
+vnet.
+
 The `name` resolver tries the segment, then the SDN vnet. It tries the
 bare bridge only for an untagged segment. A tagged access port such as
 `vmbr7.3001` stays off a vnet named `vmbr7`. VLAN 3001, VLAN 3002, and
